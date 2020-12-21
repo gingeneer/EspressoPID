@@ -29,6 +29,8 @@
 #define EEPROM_SIZE 1000
 int samples[NUMSAMPLES];
 
+uint8_t temperature[64];
+uint8_t outputArray[64];
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define OLED_RESET -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(128, 64, &Wire, OLED_RESET);
@@ -47,8 +49,10 @@ PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 int WindowSize = 500;
 unsigned long windowStartTime;
 
+uint8_t menu = 0;
 uint8_t state;
 uint8_t previousState = 0;
+uint8_t arrayIndex = 0;
 
 bool longPress = false;
 
@@ -75,49 +79,76 @@ void saveValues()
 void updateDisplay()
 {
     display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.print(input);
-    display.print(F(" C "));
+    display.setTextColor(SSD1306_WHITE);
+    display.printf("%3d%% %5.1f", (int)output, setpoint);
+    display.setTextSize(2);
+    display.setCursor(0, 9);
+    display.print(input, 1);
     display.setTextSize(1);
-    display.print((int)output);
-    display.println("%\n");
-    if (state == 0)
+    display.print(F("o"));
+    if (menu == 1)
     {
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        display.setCursor(0, 32);
+        if (state == 0)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.print(F("t:  "));
+        display.setTextColor(SSD1306_WHITE);
+        display.println(setpoint, 1);
+        if (state == 1)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.print(F("p:  "));
+        display.setTextColor(SSD1306_WHITE);
+        display.println(Kp);
+        if (state == 2)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.print(F("i:  "));
+        display.setTextColor(SSD1306_WHITE);
+        display.println(Ki);
+        if (state == 3)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.print(F("d:  "));
+        display.setTextColor(SSD1306_WHITE);
+        display.println(Kd);
+        if (state == 4)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.print(F("cal:"));
+        display.setTextColor(SSD1306_WHITE);
+        display.println(calibration);
     }
-    display.print(F("t:   "));
-    display.setTextColor(SSD1306_WHITE);
-    display.println(setpoint);
-    if (state == 1)
+    else if (menu == 0)
     {
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        int index = arrayIndex;
+        for (int i = 0; i < 64; i++)
+        {
+            uint8_t temp = temperature[index];
+            // if (temp != 0)
+            // {
+                uint8_t dutyCycle = outputArray[index];
+                display.drawLine(i, 127, i, 127 - temp, SSD1306_WHITE);
+                if (dutyCycle <= temp)
+                {
+                    display.drawPixel(i, 127 - outputArray[index], SSD1306_BLACK);
+                }
+                else
+                {
+                    display.drawPixel(i, 127 - outputArray[index], SSD1306_WHITE);
+                }
+                index = (index + 1) % 64;
+            // }
+        }
     }
-    display.print(F("p:   "));
-    display.setTextColor(SSD1306_WHITE);
-    display.println(Kp);
-    if (state == 2)
-    {
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    }
-    display.print(F("i:   "));
-    display.setTextColor(SSD1306_WHITE);
-    display.println(Ki);
-    if (state == 3)
-    {
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    }
-    display.print(F("d:   "));
-    display.setTextColor(SSD1306_WHITE);
-    display.println(Kd);
-    if (state == 4)
-    {
-        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    }
-    display.print(F("cal: "));
-    display.setTextColor(SSD1306_WHITE);
-    display.println(calibration);
+
     display.display();
 }
 
@@ -139,7 +170,8 @@ void setup(void)
     delay(500);
     display.clearDisplay();
     display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE); // Draw white text
+    display.setTextColor(SSD1306_WHITE);
+    display.setRotation(3);
     // initialize values from EEPROM
     if (!EEPROM.begin(EEPROM_SIZE))
     {
@@ -182,6 +214,7 @@ void setup(void)
 
 void loop(void)
 {
+    unsigned long looptime = millis();
     b.update();
     bool changed = false;
     if (b.changed())
@@ -193,7 +226,7 @@ void loop(void)
             changed = true;
         }
     }
-    if (millis() % 50 == 0 || changed)
+    if (looptime % 100 == 0 || changed)
     {
 
         // measure temp
@@ -224,68 +257,92 @@ void loop(void)
         steinhart = 1.0 / steinhart;                      // Invert
         steinhart -= 273.15;                              // convert absolute temp to C
         steinhart += calibration;
-
-        // do the update for the FSM
-        switch (state)
+        if (menu == 0)
         {
-        case 0:
-            // roatary encoder controlls the setpoint
             if (previousState != 0)
             {
                 encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                previousState = 0;
             }
             setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
-            break;
-        case 1:
-            if (previousState != 1)
-            {
-                encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
-            }
-            if (Kp != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-            {
-                Kp = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                myPID.SetTunings(Kp, Ki, Kd);
-            }
-            break;
-        case 2:
-            if (previousState != 2)
-            {
-                encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
-            }
-            if (Ki != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-            {
-                Ki = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                myPID.SetTunings(Kp, Ki, Kd);
-            }
-
-            break;
-        case 3:
-            if (previousState != 3)
-            {
-                encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
-            }
-            if (Kd != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-            {
-                Kd = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                myPID.SetTunings(Kp, Ki, Kd);
-            }
-            break;
-        case 4:
-            if (previousState != 4)
-            {
-                encoder.setCount(calibration * 20.0);
-            }
-            calibration = ((float)encoder.getCount()) / 20.0;
-            break;
         }
-        previousState = state;
+        if (menu == 1)
+        {
+            // do the update for the FSM
+            switch (state)
+            {
+            case 0:
+                // roatary encoder controlls the setpoint
+                if (previousState != 0)
+                {
+                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                }
+                setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
+                break;
+            case 1:
+                if (previousState != 1)
+                {
+                    encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
+                }
+                if (Kp != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Kp = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+                break;
+            case 2:
+                if (previousState != 2)
+                {
+                    encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
+                }
+                if (Ki != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Ki = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+
+                break;
+            case 3:
+                if (previousState != 3)
+                {
+                    encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
+                }
+                if (Kd != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Kd = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+                break;
+            case 4:
+                if (previousState != 4)
+                {
+                    encoder.setCount(calibration * 20.0);
+                }
+                calibration = ((float)encoder.getCount()) / 20.0;
+                break;
+            }
+            previousState = state;
+        }
+
         input = steinhart;
         myPID.Compute();
         updateDisplay();
     }
-    unsigned long curTime = millis();
+
+    // save to the array for the graphics
+    if (looptime % 500 == 0)
+    {
+        uint8_t temp = (uint8_t)(input - 80);
+        if (input - 80 < 0){
+            temp = 0;
+        }
+        temperature[arrayIndex] = (uint8_t)(temp);
+        outputArray[arrayIndex] = (uint8_t)(output / 10);
+        arrayIndex = (arrayIndex + 1) % 64;
+    }
 
     // output logic
+    unsigned long curTime = millis();
     if (curTime - windowStartTime > WindowSize)
     {
         windowStartTime += WindowSize;
@@ -300,14 +357,21 @@ void loop(void)
     // check for longpress and save to EEPROM if true
     if (b.read() == 0 && b.duration() > 3000 && longPress)
     {
-        saveValues();
-        display.writeFillRect(0, 0, 128, 64, SSD1306_WHITE);
-        display.display();
-        longPress = false;
-
-        for (int i = 0; i < 16; i++)
+        switch (menu)
         {
-            printf("EEPROM %d: %d\n", i, EEPROM.read(i));
+        case 0:
+            state = 0;
+            menu = 1;
+            break;
+        case 1:
+            saveValues();
+            display.writeFillRect(0, 0, 128, 64, SSD1306_WHITE);
+            display.display();
+            longPress = false;
+            menu = 0;
+            state = 0;
+            break;
         }
+        longPress = false;
     }
 }
