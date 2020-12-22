@@ -52,7 +52,9 @@ unsigned long windowStartTime;
 uint8_t menu = 0;
 uint8_t state;
 uint8_t previousState = 0;
+uint8_t previousMenu = 0;
 uint8_t arrayIndex = 0;
+uint8_t selection = 0;
 
 bool longPress = false;
 
@@ -129,24 +131,40 @@ void updateDisplay()
     else if (menu == 0)
     {
         int index = arrayIndex;
+        uint8_t previousDuty = outputArray[arrayIndex];
         for (int i = 0; i < 64; i++)
         {
             uint8_t temp = temperature[index];
-            // if (temp != 0)
-            // {
-                uint8_t dutyCycle = outputArray[index];
-                display.drawLine(i, 127, i, 127 - temp, SSD1306_WHITE);
-                if (dutyCycle <= temp)
-                {
-                    display.drawPixel(i, 127 - outputArray[index], SSD1306_BLACK);
-                }
-                else
-                {
-                    display.drawPixel(i, 127 - outputArray[index], SSD1306_WHITE);
-                }
-                index = (index + 1) % 64;
-            // }
+            uint8_t dutyCycle = outputArray[index];
+            display.drawLine(i, 128, i, 128 - temp, SSD1306_WHITE);
+            if (dutyCycle <= temp)
+            {
+                display.drawLine(i, 127 - previousDuty, i, 127 - dutyCycle, SSD1306_BLACK);
+            }
+            else
+            {
+                display.drawLine(i, 127 - previousDuty, i, 127 - dutyCycle, SSD1306_WHITE);
+            }
+            index = (index + 1) % 64;
+            previousDuty = dutyCycle;
         }
+    }
+    else if (menu == 2)
+    {
+        display.setCursor(0, 32);
+        display.setTextSize(1);
+        display.println("save to\nEEPROM?\n");
+        if (selection == 0)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.println("- Yes");
+        display.setTextColor(SSD1306_WHITE);
+        if (selection == 1)
+        {
+            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        }
+        display.println("- No");
     }
 
     display.display();
@@ -259,28 +277,27 @@ void loop(void)
         steinhart += calibration;
         if (menu == 0)
         {
-            if (previousState != 0)
+            if (previousMenu != menu)
             {
                 encoder.setCount(setpoint * ENCODER_RESOLUTION);
-                previousState = 0;
             }
             setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
         }
-        if (menu == 1)
+        else if (menu == 1)
         {
             // do the update for the FSM
             switch (state)
             {
             case 0:
                 // roatary encoder controlls the setpoint
-                if (previousState != 0)
+                if (previousState != 0 || previousMenu != menu)
                 {
                     encoder.setCount(setpoint * ENCODER_RESOLUTION);
                 }
                 setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
                 break;
             case 1:
-                if (previousState != 1)
+                if (previousState != 1 || previousMenu != menu)
                 {
                     encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
                 }
@@ -291,7 +308,7 @@ void loop(void)
                 }
                 break;
             case 2:
-                if (previousState != 2)
+                if (previousState != 2 || previousMenu != menu)
                 {
                     encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
                 }
@@ -303,7 +320,7 @@ void loop(void)
 
                 break;
             case 3:
-                if (previousState != 3)
+                if (previousState != 3 || previousMenu != menu)
                 {
                     encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
                 }
@@ -314,7 +331,7 @@ void loop(void)
                 }
                 break;
             case 4:
-                if (previousState != 4)
+                if (previousState != 4 || previousMenu != menu)
                 {
                     encoder.setCount(calibration * 20.0);
                 }
@@ -322,6 +339,30 @@ void loop(void)
                 break;
             }
             previousState = state;
+        }
+        else if (menu == 2)
+        {
+            if (previousMenu != menu)
+            {
+                encoder.setCount(0);
+            }
+            selection = encoder.getCount() % 2;
+            if (previousState == 0 && state == 1 && selection == 0)
+            {
+                saveValues();
+                display.writeFillRect(0, 0, 128, 64, SSD1306_WHITE);
+                display.display();
+                menu = 0;
+                state = 0;
+            }
+            else if (previousState == 0 && state == 1 && selection == 1)
+            {
+                menu = 0;
+                state = 0;
+            }
+            previousState = state;
+            
+        previousMenu = menu;
         }
 
         input = steinhart;
@@ -333,12 +374,14 @@ void loop(void)
     if (looptime % 500 == 0)
     {
         uint8_t temp = (uint8_t)(input - 80);
-        if (input - 80 < 0){
+        if (input - 80 < 0)
+        {
             temp = 0;
         }
         temperature[arrayIndex] = (uint8_t)(temp);
         outputArray[arrayIndex] = (uint8_t)(output / 10);
         arrayIndex = (arrayIndex + 1) % 64;
+        Serial.println(String(input) + ", " + String(output));
     }
 
     // output logic
@@ -346,8 +389,6 @@ void loop(void)
     if (curTime - windowStartTime > WindowSize)
     {
         windowStartTime += WindowSize;
-        Serial.println(String(input) + ", " + String(output));
-        //      Serial.println(loopRuntime);
     }
     if (curTime - windowStartTime <= output * (WindowSize / 100))
         digitalWrite(SSR_PIN, HIGH);
@@ -364,11 +405,7 @@ void loop(void)
             menu = 1;
             break;
         case 1:
-            saveValues();
-            display.writeFillRect(0, 0, 128, 64, SSD1306_WHITE);
-            display.display();
-            longPress = false;
-            menu = 0;
+            menu = 2;
             state = 0;
             break;
         }
