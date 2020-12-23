@@ -1,4 +1,5 @@
 #include "EEPROM.h"
+#include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Bounce2.h>
@@ -6,6 +7,7 @@
 #include <PID_v1.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 
 // which analog pin to connect
 #define THERMISTORPIN 4
@@ -46,8 +48,11 @@ float calibration = -2.3;
 double Kp = 2, Ki = 5, Kd = 1;
 PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 // how long is one period of SSR control in ms
-int WindowSize = 500;
+int windowSize = 500;
 unsigned long windowStartTime;
+unsigned long shotTimerStart;
+unsigned long shotTimerStop;
+bool timerRunning;
 
 uint8_t menu = 0;
 uint8_t state;
@@ -55,8 +60,6 @@ uint8_t previousState = 0;
 uint8_t previousMenu = 0;
 uint8_t arrayIndex = 0;
 uint8_t selection = 0;
-
-bool longPress = false;
 
 Bounce b = Bounce();
 
@@ -234,19 +237,139 @@ void loop(void)
 {
     unsigned long looptime = millis();
     b.update();
-    bool changed = false;
+    bool selectPressed = false;
+    // bool backPressed = false;
+    bool longSelect = false;
+    bool longPressPossible = false;
+    bool update = false;
     if (b.changed())
     {
         if (b.read() == 0)
         {
-            state = (state + 1) % 5;
-            longPress = true;
-            changed = true;
+            update = true;
+            longPressPossible = true;
+            selectPressed = true;
         }
     }
-    if (looptime % 100 == 0 || changed)
+    // check for longpress
+    if (b.read() == 0 && b.duration() > 3000 && longPressPossible)
     {
-
+        longSelect = true;
+        longPressPossible = false;
+    }
+    // FSM update
+    if (looptime % 20 == 0 || update)
+    {
+        switch (menu)
+        {
+        case 0:
+            setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
+            switch (state)
+            {
+            case 0:
+                // if pressed, start clock and switch to running state
+                if (selectPressed)
+                {
+                    shotTimerStart = millis();
+                    state = 1;
+                }
+                break;
+            case 1:
+                // clock running, stop if pressed
+                if (selectPressed)
+                {
+                    shotTimerStop = millis();
+                    state = 2;
+                }
+                break;
+            case 2:
+                if (selectPressed)
+                {
+                    state = 0;
+                }
+                break;
+            }
+            if (longSelect)
+            {
+                menu = 1;
+                state = 0;
+                encoder.setCount(setpoint * ENCODER_RESOLUTION);
+            }
+            break;
+        case 1:
+        // screen to config the values
+            switch (state)
+            {
+            case 0:
+                // roatary encoder controlls the setpoint
+                if (previousState != 0 || previousMenu != menu)
+                {
+                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                }
+                setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
+                if (selectPressed)
+                {
+                    state = 1;
+                    encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
+                }
+                break;
+            case 1:
+                if (Kp != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Kp = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+                if (selectPressed)
+                {
+                    state = 2;
+                    encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
+                }
+                break;
+            case 2:
+                if (Ki != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Ki = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+                if (selectPressed)
+                {
+                    state = 3;
+                    encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
+                }
+                break;
+            case 3:
+                if (Kd != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                {
+                    Kd = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    myPID.SetTunings(Kp, Ki, Kd);
+                }
+                if (selectPressed)
+                {
+                    state = 4;
+                    encoder.setCount(calibration * 20.0);
+                }
+                break;
+            case 4:
+                calibration = ((float)encoder.getCount()) / 20.0;
+                if (selectPressed)
+                {
+                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                    state = 0;
+                }
+                break;
+            }
+            if (longSelect)
+            {
+                saveValues();
+                menu = 0;
+                state = 0;
+                encoder.setCount(setpoint * ENCODER_RESOLUTION);
+            }
+            break;
+        }
+    }
+    if (looptime % 50 == 0)
+    {
         // measure temp
         uint8_t i;
         float average;
@@ -275,101 +398,10 @@ void loop(void)
         steinhart = 1.0 / steinhart;                      // Invert
         steinhart -= 273.15;                              // convert absolute temp to C
         steinhart += calibration;
-        if (menu == 0)
-        {
-            if (previousMenu != menu)
-            {
-                encoder.setCount(setpoint * ENCODER_RESOLUTION);
-            }
-            setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
-        }
-        else if (menu == 1)
-        {
-            // do the update for the FSM
-            switch (state)
-            {
-            case 0:
-                // roatary encoder controlls the setpoint
-                if (previousState != 0 || previousMenu != menu)
-                {
-                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
-                }
-                setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
-                break;
-            case 1:
-                if (previousState != 1 || previousMenu != menu)
-                {
-                    encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
-                }
-                if (Kp != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-                {
-                    Kp = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                    myPID.SetTunings(Kp, Ki, Kd);
-                }
-                break;
-            case 2:
-                if (previousState != 2 || previousMenu != menu)
-                {
-                    encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
-                }
-                if (Ki != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-                {
-                    Ki = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                    myPID.SetTunings(Kp, Ki, Kd);
-                }
-
-                break;
-            case 3:
-                if (previousState != 3 || previousMenu != menu)
-                {
-                    encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
-                }
-                if (Kd != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
-                {
-                    Kd = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
-                    myPID.SetTunings(Kp, Ki, Kd);
-                }
-                break;
-            case 4:
-                if (previousState != 4 || previousMenu != menu)
-                {
-                    encoder.setCount(calibration * 20.0);
-                }
-                calibration = ((float)encoder.getCount()) / 20.0;
-                break;
-            }
-            previousState = state;
-        }
-        else if (menu == 2)
-        {
-            if (previousMenu != menu)
-            {
-                encoder.setCount(0);
-            }
-            selection = encoder.getCount() % 2;
-            if (previousState == 0 && state == 1 && selection == 0)
-            {
-                saveValues();
-                display.writeFillRect(0, 0, 128, 64, SSD1306_WHITE);
-                display.display();
-                menu = 0;
-                state = 0;
-            }
-            else if (previousState == 0 && state == 1 && selection == 1)
-            {
-                menu = 0;
-                state = 0;
-            }
-            previousState = state;
-            
-        previousMenu = menu;
-        }
-
         input = steinhart;
         myPID.Compute();
         updateDisplay();
     }
-
     // save to the array for the graphics
     if (looptime % 500 == 0)
     {
@@ -384,31 +416,14 @@ void loop(void)
         Serial.println(String(input) + ", " + String(output));
     }
 
-    // output logic
+    // output logic for the SSR
     unsigned long curTime = millis();
-    if (curTime - windowStartTime > WindowSize)
+    if (curTime - windowStartTime > windowSize)
     {
-        windowStartTime += WindowSize;
+        windowStartTime += windowSize;
     }
-    if (curTime - windowStartTime <= output * (WindowSize / 100))
+    if (curTime - windowStartTime <= output * (windowSize / 100))
         digitalWrite(SSR_PIN, HIGH);
     else
         digitalWrite(SSR_PIN, LOW);
-
-    // check for longpress and save to EEPROM if true
-    if (b.read() == 0 && b.duration() > 3000 && longPress)
-    {
-        switch (menu)
-        {
-        case 0:
-            state = 0;
-            menu = 1;
-            break;
-        case 1:
-            menu = 2;
-            state = 0;
-            break;
-        }
-        longPress = false;
-    }
 }
