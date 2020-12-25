@@ -9,10 +9,20 @@
 #include <Wire.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 
-// which analog pin to connect
-#define THERMISTORPIN 4
-#define SSR_PIN 2
-#define ENCODER_BUTTON_PIN 5
+//// these pins are defined in user_setup.h in the tft_espi library
+// here just for reference
+// #define TFT_MISO 19  // got no use for MISO with my screen
+// #define TFT_MOSI 23
+// #define TFT_SCLK 18
+// #define TFT_CS   15  // Chip select control pin
+// #define TFT_DC    2  // Data Command control pin
+// #define TFT_RST   4  // Reset pin (could connect to RST pin)
+
+#define THERMISTOR_PIN 34 // VP pin in my case
+#define SSR_PIN 13 
+#define ENCODER_BUTTON_PIN 22
+#define ENCODER_CLK 19
+#define ENCODER_DT 21
 // resistance at 25 degrees C
 #define THERMISTORNOMINAL 100000
 // temp. for nominal resistance (almost always 25 C)
@@ -227,7 +237,7 @@ void setup(void)
     // Enable the weak pull up resistors
     ESP32Encoder::useInternalWeakPullResistors = UP;
     // Attache pins for use as encoder pins
-    encoder.attachHalfQuad(19, 18);
+    encoder.attachHalfQuad(ENCODER_CLK, ENCODER_DT);
     encoder.setCount(setpoint * ENCODER_RESOLUTION);
     b.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
     b.interval(25);
@@ -267,7 +277,7 @@ void loop(void)
             switch (state)
             {
             case 0:
-                // if pressed, start clock and switch to running state
+                // if pressed, start timer and switch to running state
                 if (selectPressed)
                 {
                     shotTimerStart = millis();
@@ -275,7 +285,7 @@ void loop(void)
                 }
                 break;
             case 1:
-                // clock running, stop if pressed
+                // timer running, stop if pressed
                 if (selectPressed)
                 {
                     shotTimerStop = millis();
@@ -377,7 +387,7 @@ void loop(void)
         // take N samples in a row, with a slight delay
         for (i = 0; i < NUMSAMPLES; i++)
         {
-            samples[i] = analogRead(THERMISTORPIN);
+            samples[i] = analogRead(THERMISTOR_PIN);
         }
         // average all the samples out
         average = 0;
