@@ -1,13 +1,11 @@
 #include "EEPROM.h"
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
 #include <PID_v1.h>
 #include <SPI.h>
-#include <Wire.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
+#include <Wire.h>
 
 //// these pins are defined in user_setup.h in the tft_espi library
 // here just for reference
@@ -19,10 +17,10 @@
 // #define TFT_RST   4  // Reset pin (could connect to RST pin)
 
 #define THERMISTOR_PIN 34 // VP pin in my case
-#define SSR_PIN 13 
+#define SSR_PIN 13
 #define ENCODER_BUTTON_PIN 22
-#define ENCODER_CLK 19
-#define ENCODER_DT 21
+#define ENCODER_CLK 21
+#define ENCODER_DT 19
 // resistance at 25 degrees C
 #define THERMISTORNOMINAL 100000
 // temp. for nominal resistance (almost always 25 C)
@@ -35,23 +33,20 @@
 // the value of the 'other' resistor
 #define SERIESRESISTOR 99000
 // how many speps per degree
-#define ENCODER_RESOLUTION 2.0
+#define OFFSET_ENCODER_RESOLUTION 2.0
 #define PID_ENCODER_RESOLUTION 100.0
 
 #define EEPROM_SIZE 1000
 int samples[NUMSAMPLES];
 
-uint8_t temperature[64];
-uint8_t outputArray[64];
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-#define OLED_RESET -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-Adafruit_SSD1306 display(128, 64, &Wire, OLED_RESET);
+uint16_t tempArray[TFT_WIDTH];
+uint8_t outputArray[TFT_WIDTH];
 
 ESP32Encoder encoder;
 
-//Define Variables we'll be connecting to
-// output = active time of SSR / 10ms
-// 1 -> 10ms = 1 zero crossing
+TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
+
+//Define Variables we'll be connecting to PID
 double setpoint = 105, input, output;
 float calibration = -2.3;
 //Specify the links and initial tuning parameters
@@ -70,8 +65,9 @@ uint8_t previousState = 0;
 uint8_t previousMenu = 0;
 uint8_t arrayIndex = 0;
 uint8_t selection = 0;
+bool longPressPossible = false;
 
-Bounce b = Bounce();
+Bounce bounce = Bounce();
 
 void saveValues()
 {
@@ -93,94 +89,81 @@ void saveValues()
 // update the display output
 void updateDisplay()
 {
-    display.clearDisplay();
-    display.setCursor(0, 0);
-    display.setTextColor(SSD1306_WHITE);
-    display.printf("%3d%% %5.1f", (int)output, setpoint);
-    display.setTextSize(2);
-    display.setCursor(0, 9);
-    display.print(input, 1);
-    display.setTextSize(1);
-    display.print(F("o"));
-    if (menu == 1)
-    {
-        display.setCursor(0, 32);
-        if (state == 0)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.print(F("t:  "));
-        display.setTextColor(SSD1306_WHITE);
-        display.println(setpoint, 1);
-        if (state == 1)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.print(F("p:  "));
-        display.setTextColor(SSD1306_WHITE);
-        display.println(Kp);
-        if (state == 2)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.print(F("i:  "));
-        display.setTextColor(SSD1306_WHITE);
-        display.println(Ki);
-        if (state == 3)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.print(F("d:  "));
-        display.setTextColor(SSD1306_WHITE);
-        display.println(Kd);
-        if (state == 4)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.print(F("cal:"));
-        display.setTextColor(SSD1306_WHITE);
-        display.println(calibration);
-    }
-    else if (menu == 0)
-    {
-        int index = arrayIndex;
-        uint8_t previousDuty = outputArray[arrayIndex];
-        for (int i = 0; i < 64; i++)
-        {
-            uint8_t temp = temperature[index];
-            uint8_t dutyCycle = outputArray[index];
-            display.drawLine(i, 128, i, 128 - temp, SSD1306_WHITE);
-            if (dutyCycle <= temp)
-            {
-                display.drawLine(i, 127 - previousDuty, i, 127 - dutyCycle, SSD1306_BLACK);
-            }
-            else
-            {
-                display.drawLine(i, 127 - previousDuty, i, 127 - dutyCycle, SSD1306_WHITE);
-            }
-            index = (index + 1) % 64;
-            previousDuty = dutyCycle;
-        }
-    }
-    else if (menu == 2)
-    {
-        display.setCursor(0, 32);
-        display.setTextSize(1);
-        display.println("save to\nEEPROM?\n");
-        if (selection == 0)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.println("- Yes");
-        display.setTextColor(SSD1306_WHITE);
-        if (selection == 1)
-        {
-            display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        }
-        display.println("- No");
-    }
+    long curTime = millis();
+    tft.setCursor(0, 0, 1);
+    // Set the font colour to be white with a black background, set text size multiplier to 1
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(1);
+    int uptime_mins = curTime / (1000 * 60);
+    int uptime_secs = (curTime / (1000)) % 60;
+    tft.printf("%3d:%02d", uptime_mins, uptime_secs);
+    tft.setTextDatum(TR_DATUM); // top right
+    tft.drawFloat(setpoint, 1, TFT_WIDTH, 0);
+    tft.setTextDatum(TC_DATUM); // top center
+    char buf[5];
+    snprintf(buf, 5, "%d%%", (int)output);
+    tft.drawString(buf, TFT_WIDTH / 2, 0);
+    tft.drawFastHLine(0, tft.fontHeight(1) + 1, TFT_WIDTH, TFT_ORANGE);
 
-    display.display();
+    switch (menu)
+    {
+    case 0:
+        // cant do that...
+        // tft.fillRect(0, 12, TFT_WIDTH, TFT_HEIGHT, TFT_BLACK);
+        tft.setTextColor(TFT_WHITE, TFT_BLACK);
+        tft.setTextDatum(TL_DATUM);
+        tft.setTextFont(2);
+        uint8_t len = tft.drawFloat(input, 1, 0, 12);
+        tft.setTextFont(1);
+        tft.drawString("o", len, 12);
+        tft.setTextDatum(TR_DATUM);
+        char buf[7];
+        switch (state)
+        {
+        case 0:
+            strncpy(buf, "  0.0s", 7);
+            tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+            break;
+        case 1:
+            snprintf(buf, 7, "%.1fs", float(curTime - shotTimerStart) / 1000);
+            tft.setTextColor(TFT_WHITE, TFT_BLACK);
+            break;
+        case 2:
+            snprintf(buf, 7, "%.1fs", float(shotTimerStop - shotTimerStart) / 1000);
+            tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+            break;
+        }
+        tft.setTextFont(2);
+        tft.drawString(buf, TFT_WIDTH, 12);
+        // graph part
+        const int min = 70;
+        const int max = 160;
+        // const int height = 90;
+        tft.setTextDatum(BL_DATUM);
+        tft.setTextFont(1);
+        tft.setTextSize(1);
+        tft.setTextColor(TFT_DARKGREY);
+        tft.drawNumber(min, 0, TFT_HEIGHT);
+        tft.setTextDatum(CL_DATUM);
+        len = tft.drawNumber(100, 0, TFT_HEIGHT - 100 + min);
+        tft.drawFastHLine(len, TFT_HEIGHT - 100 + min, TFT_WIDTH, TFT_DARKGREY);
+        len = tft.drawNumber(max, 0, TFT_HEIGHT - max + min);
+        tft.drawFastHLine(len, TFT_HEIGHT - max + min, TFT_WIDTH, TFT_DARKGREY);
+        // this is too slow
+        // int index = arrayIndex;
+        // uint8_t previousDuty = outputArray[0];
+        // uint8_t previousTemp = tempArray[0];
+        // for (int i = 0; i < TFT_WIDTH; i++)
+        // {
+        //     uint8_t temp = TFT_HEIGHT - ((tempArray[index] / 100) - 70);
+        //     uint8_t dutyCycle = TFT_HEIGHT - outputArray[index];
+        //     tft.drawFastVLine(i, previousTemp, temp, TFT_RED);
+        //     tft.drawFastVLine(i, previousDuty, dutyCycle, TFT_GREEN);
+        //     index = (index + 1) % TFT_WIDTH;
+        //     previousDuty = dutyCycle;
+        //     previousTemp = temp;
+        // }
+    }
 }
 
 void setup(void)
@@ -188,25 +171,16 @@ void setup(void)
     Serial.begin(115200);
     // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
     pinMode(SSR_PIN, OUTPUT);
-    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
-    {
-        Serial.println(F("SSD1306 allocation failed"));
-        // also probably set output low
-        digitalWrite(SSR_PIN, LOW);
-        delay(1000);
-        ESP.restart();
-    }
-
-    display.display();
-    delay(500);
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setRotation(3);
+    // initialize the TFT
+    tft.init();
+    tft.setRotation(2);
+    tft.fillScreen(TFT_BLACK);
+    // We can now plot text on screen using the "print" class
+    // tft.println("Hello World!");
     // initialize values from EEPROM
     if (!EEPROM.begin(EEPROM_SIZE))
     {
-        display.println("faled to initialise EEPROM");
+        tft.println("faled to initialise EEPROM");
         delay(2000);
     }
     else
@@ -238,23 +212,22 @@ void setup(void)
     ESP32Encoder::useInternalWeakPullResistors = UP;
     // Attache pins for use as encoder pins
     encoder.attachHalfQuad(ENCODER_CLK, ENCODER_DT);
-    encoder.setCount(setpoint * ENCODER_RESOLUTION);
-    b.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
-    b.interval(25);
+    encoder.setCount(setpoint * OFFSET_ENCODER_RESOLUTION);
+    bounce.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
+    bounce.interval(25);
 }
 
 void loop(void)
 {
     unsigned long looptime = millis();
-    b.update();
+    bounce.update();
     bool selectPressed = false;
     // bool backPressed = false;
     bool longSelect = false;
-    bool longPressPossible = false;
     bool update = false;
-    if (b.changed())
+    if (bounce.changed())
     {
-        if (b.read() == 0)
+        if (bounce.read() == 0)
         {
             update = true;
             longPressPossible = true;
@@ -262,10 +235,11 @@ void loop(void)
         }
     }
     // check for longpress
-    if (b.read() == 0 && b.duration() > 3000 && longPressPossible)
+    if (bounce.read() == 0 && bounce.duration() > 3000 && longPressPossible)
     {
         longSelect = true;
         longPressPossible = false;
+        update = true;
     }
     // FSM update
     if (looptime % 20 == 0 || update)
@@ -273,7 +247,7 @@ void loop(void)
         switch (menu)
         {
         case 0:
-            setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
+            setpoint = ((float)encoder.getCount()) / OFFSET_ENCODER_RESOLUTION;
             switch (state)
             {
             case 0:
@@ -303,20 +277,20 @@ void loop(void)
             {
                 menu = 1;
                 state = 0;
-                encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                encoder.setCount(setpoint * OFFSET_ENCODER_RESOLUTION);
             }
             break;
         case 1:
-        // screen to config the values
+            // screen to config the values
             switch (state)
             {
             case 0:
                 // roatary encoder controlls the setpoint
                 if (previousState != 0 || previousMenu != menu)
                 {
-                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                    encoder.setCount(setpoint * OFFSET_ENCODER_RESOLUTION);
                 }
-                setpoint = ((float)encoder.getCount()) / ENCODER_RESOLUTION;
+                setpoint = ((float)encoder.getCount()) / OFFSET_ENCODER_RESOLUTION;
                 if (selectPressed)
                 {
                     state = 1;
@@ -363,17 +337,17 @@ void loop(void)
                 calibration = ((float)encoder.getCount()) / 20.0;
                 if (selectPressed)
                 {
-                    encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                    encoder.setCount(setpoint * OFFSET_ENCODER_RESOLUTION);
                     state = 0;
                 }
                 break;
             }
             if (longSelect)
             {
-                saveValues();
+                // saveValues();
                 menu = 0;
                 state = 0;
-                encoder.setCount(setpoint * ENCODER_RESOLUTION);
+                encoder.setCount(setpoint * OFFSET_ENCODER_RESOLUTION);
             }
             break;
         }
@@ -420,9 +394,9 @@ void loop(void)
         {
             temp = 0;
         }
-        temperature[arrayIndex] = (uint8_t)(temp);
-        outputArray[arrayIndex] = (uint8_t)(output / 10);
-        arrayIndex = (arrayIndex + 1) % 64;
+        tempArray[arrayIndex] = (uint16_t)(temp * 100);
+        outputArray[arrayIndex] = (uint8_t)(output);
+        arrayIndex = (arrayIndex + 1) % TFT_WIDTH;
         Serial.println(String(input) + ", " + String(output));
     }
 
