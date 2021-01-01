@@ -32,7 +32,9 @@
 // The beta coefficient of the thermistor (usually 3000-4000)
 #define BCOEFFICIENT 3950
 // the value of the 'other' resistor
-#define SERIESRESISTOR 99000
+// #define SERIESRESISTOR 99000
+// 10k better for this temp range
+#define SERIESRESISTOR 9850
 // how many speps per degree
 #define SETPOINT_ENCODER_RESOLUTION 2.0
 #define PID_ENCODER_RESOLUTION 100.0
@@ -58,7 +60,7 @@ double temp_offset = 0;
 double Kp = 2, Ki = 5, Kd = 1;
 PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 // how long is one period of SSR control in ms
-int windowSize = 500;
+int windowSize = 250;
 unsigned long windowStartTime;
 unsigned long shotTimerStart;
 unsigned long shotTimerStop;
@@ -82,19 +84,21 @@ void saveValues()
     //save values to eeprom, value * 100, then first lower byte, then upper
     // value * 1000 for pid values and calibration
     int addr = 0;
-    EEPROM.writeFloat(addr, setpoint);
-    addr += sizeof(float);
-    EEPROM.writeFloat(addr, Kp);
-    addr += sizeof(float);
-    EEPROM.writeFloat(addr, Ki);
-    addr += sizeof(float);
-    EEPROM.writeFloat(addr, Kd);
-    addr += sizeof(float);
-    EEPROM.writeFloat(addr, calibration);
+    EEPROM.writeDouble(addr, setpoint);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, Kp);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, Ki);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, Kd);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, calibration);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, temp_offset);
     EEPROM.commit();
 }
 
-void updateGraph(float temp, float dutycycle, bool initialize)
+void updateGraph(double temp, float dutycycle, bool initialize)
 {
     if (menu != 0)
         return;
@@ -199,7 +203,7 @@ void updateDisplay()
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(2);
-    uint8_t len = tft.drawFloat(input + temp_offset, 1, 0, 12);
+    uint8_t len = tft.drawFloat(input, 1, 0, 12);
     tft.setTextFont(1);
     tft.drawString("o", len, 12);
 
@@ -305,15 +309,17 @@ void setup(void)
         // load the values from EEPROM
 
         int addr = 0;
-        setpoint = EEPROM.readFloat(addr);
-        addr += sizeof(float);
-        Kp = EEPROM.readFloat(addr);
-        addr += sizeof(float);
-        Ki = EEPROM.readFloat(addr);
-        addr += sizeof(float);
-        Kd = EEPROM.readFloat(addr);
-        addr += sizeof(float);
-        calibration = EEPROM.readFloat(addr);
+        setpoint = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        Kp = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        Ki = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        Kd = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        calibration = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        temp_offset = EEPROM.readDouble(addr);
     }
     // set initial PID values
     input = 25.0;
@@ -370,7 +376,7 @@ void loop(void)
         switch (menu)
         {
         case 0:
-            setpoint = ((float)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
+            setpoint = ((double)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
             switch (state)
             {
             case 0:
@@ -415,7 +421,7 @@ void loop(void)
                 // {
                 //     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
                 // }
-                setpoint = ((float)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
+                setpoint = ((double)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
                 if (selectPressed)
                 {
                     state = 1;
@@ -431,9 +437,9 @@ void loop(void)
                 }
                 break;
             case 1:
-                if (Kp != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                if (Kp != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
-                    Kp = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    Kp = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
                     myPID.SetTunings(Kp, Ki, Kd);
                 }
                 if (selectPressed)
@@ -450,9 +456,9 @@ void loop(void)
                 }
                 break;
             case 2:
-                if (Ki != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                if (Ki != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
-                    Ki = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    Ki = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
                     myPID.SetTunings(Kp, Ki, Kd);
                 }
                 if (selectPressed)
@@ -469,9 +475,9 @@ void loop(void)
                 }
                 break;
             case 3:
-                if (Kd != (((float)encoder.getCount()) / PID_ENCODER_RESOLUTION))
+                if (Kd != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
-                    Kd = ((float)encoder.getCount()) / PID_ENCODER_RESOLUTION;
+                    Kd = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
                     myPID.SetTunings(Kp, Ki, Kd);
                 }
                 if (selectPressed)
@@ -488,7 +494,7 @@ void loop(void)
                 }
                 break;
             case 4:
-                calibration = ((float)encoder.getCount()) / 20.0;
+                calibration = ((double)encoder.getCount()) / 20.0;
                 if (selectPressed)
                 {
                     encoder.setCount(temp_offset * 10.0);
@@ -578,11 +584,11 @@ void loop(void)
         updateDisplay();
     }
     // save to the array for the graphics
-    if (looptime % 1000 == 0)
+    if (looptime % 500 == 0)
     {
         graphX = (graphX + 1) % TFT_WIDTH;
         Serial.println(String(input) + ", " + String(output));
-        updateGraph(input + temp_offset, output, initGraph);
+        updateGraph(input, output, initGraph);
         initGraph = false;
     }
 
