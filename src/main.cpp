@@ -16,7 +16,8 @@
 // #define TFT_DC    2  // Data Command control pin
 // #define TFT_RST   4  // Reset pin (could connect to RST pin)
 
-#define THERMISTOR_PIN 34 // VP pin in my case
+#define THERMISTOR_PIN 34 
+#define THERMOCOUPLE_PIN 35
 #define SSR_PIN 13
 #define ENCODER_BUTTON_PIN 22
 #define BACK_BUTTON_PIN 14
@@ -26,9 +27,7 @@
 #define THERMISTORNOMINAL 100000
 // temp. for nominal resistance (almost always 25 C)
 #define TEMPERATURENOMINAL 25
-// how many samples to take and average, more takes longer
-// but is more 'smooth'
-#define NUMSAMPLES 10
+
 // The beta coefficient of the thermistor (usually 3000-4000)
 #define BCOEFFICIENT 3950
 // the value of the 'other' resistor
@@ -40,35 +39,81 @@
 #define PID_ENCODER_RESOLUTION 100.0
 
 #define EEPROM_SIZE 1000
-int samples[NUMSAMPLES];
 
 // uint16_t tempArray[TFT_WIDTH];
 // uint8_t outputArray[TFT_WIDTH];
 uint8_t previousTempY = 0;
+uint8_t previousTemp2Y = 0;
 uint8_t previousDutyY = 40;
 
 ESP32Encoder encoder;
 
-TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
+// how many samples to take and average, more takes longer
+// but is more 'smooth' (NUMSAMPLE*ADCSampleInterval < pidInterval)
+#define NUMSAMPLES 20
+const int displayInterval = 50, graphInterval = 500, pidInterval = 250, ADCSampleInterval = 5;
+unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousADCSampleTime = 0, startADCSampleTime = 0;
+uint8_t currentADCSample = 0;
+uint32_t ThermistorSamples, ThermocoupleSamples;
 
+TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
+float thermistor, thermocouple;
 //Define Variables we'll be connecting to PID
 double setpoint = 105, input, output;
 double calibration = -2.3;
+double overshoot = 2.0;
+bool overshootMode = false;
 //offset for display (what boiler temp equals which water temp)
 double temp_offset = 0;
+double thermocouple_offset;
 //Specify the links and initial tuning parameters
 double Kp = 2, Ki = 5, Kd = 1;
+// aggressive tunings for PID outside of overshoot range
+double aKp = 100, aKi = 0, aKd = 0;
+// 0: thermistor
+// 1: thermocouple
+// 2: avg(thermistor, thermocouple)
+uint8_t pidSource = 0;
 PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 // how long is one period of SSR control in ms
-int windowSize = 250;
+int windowSize = 500;
 unsigned long windowStartTime;
 unsigned long shotTimerStart;
 unsigned long shotTimerStop;
 bool timerRunning;
 bool initGraph = false;
 
-uint8_t menu = 0;
-uint8_t state;
+enum SetupStates
+{
+    SETPOINT,
+    P,
+    I,
+    D,
+    CAL,
+    TM_OFFSET,
+    TC_OFFSET,
+    OVERSHOOT,
+    PID_MODE,
+    QUIT
+};
+enum MainScreenStates
+{
+    RESET,
+    START,
+    STOP
+};
+enum MenuState
+{
+    MAIN,
+    SETUP
+};
+
+enum MenuState menu;
+enum SetupStates setupState;
+enum MainScreenStates mainScreenState;
+
+// uint8_t menu = 0;
+// uint8_t state;
 uint8_t previousState = 0;
 uint8_t previousMenu = 0;
 uint8_t graphX = 0;
@@ -77,7 +122,6 @@ bool longPressPossible = false;
 
 Bounce encoderBounce = Bounce();
 Bounce backButtonBounce = Bounce();
-
 
 void saveValues()
 {
@@ -95,12 +139,18 @@ void saveValues()
     EEPROM.writeDouble(addr, calibration);
     addr += sizeof(double);
     EEPROM.writeDouble(addr, temp_offset);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, thermocouple_offset);
+    addr += sizeof(double);
+    EEPROM.writeDouble(addr, overshoot);
+    addr += sizeof(double);
+    EEPROM.writeShort(addr, pidSource);
     EEPROM.commit();
 }
 
-void updateGraph(double temp, float dutycycle, bool initialize)
+void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
 {
-    if (menu != 0)
+    if (menu != MAIN)
         return;
     // min/max temp
     const uint8_t min = 80;
@@ -110,7 +160,8 @@ void updateGraph(double temp, float dutycycle, bool initialize)
     // how many pixel per temp
     float scale = float(height) / (float(max) - min);
     uint8_t nextIndex = (graphX + 1) % TFT_WIDTH;
-    uint8_t tempY = TFT_HEIGHT - uint8_t(((temp - min) * scale + 0.5));
+    uint8_t tempY = TFT_HEIGHT - uint8_t(((temp1 - min) * scale + 0.5));
+    uint8_t temp2Y = TFT_HEIGHT - uint8_t(((temp2 - min) * scale + 0.5));
     uint8_t dutyCycleY = TFT_HEIGHT - uint8_t(dutycycle * (float(height) / 100.0f) + 0.5);
     if (dutyCycleY == TFT_HEIGHT)
         dutyCycleY = TFT_HEIGHT - 1;
@@ -159,7 +210,7 @@ void updateGraph(double temp, float dutycycle, bool initialize)
     {
         tft.drawPixel(graphX, dutyCycleY, TFT_GREEN);
     }
-    if (temp >= min && temp <= max)
+    if (temp1 >= min && temp1 <= max)
     {
         if (tempY > previousTempY)
         {
@@ -174,9 +225,25 @@ void updateGraph(double temp, float dutycycle, bool initialize)
             tft.drawPixel(graphX, tempY, TFT_RED);
         }
     }
+    if (temp2 >= min && temp2 <= max)
+    {
+        if (temp2Y > previousTemp2Y)
+        {
+            tft.drawFastVLine(graphX, previousTemp2Y, temp2Y - previousTemp2Y + 1, TFT_PINK);
+        }
+        else if (temp2Y < previousTemp2Y)
+        {
+            tft.drawFastVLine(graphX, temp2Y, previousTemp2Y - temp2Y + 1, TFT_PINK);
+        }
+        else
+        {
+            tft.drawPixel(graphX, temp2Y, TFT_PINK);
+        }
+    }
     tft.drawFastVLine(nextIndex, TFT_HEIGHT - height - 4, height + 4, TFT_WHITE);
     previousDutyY = dutyCycleY;
     previousTempY = tempY;
+    previousTemp2Y = temp2Y;
 }
 
 // update the display output
@@ -195,36 +262,48 @@ void updateDisplay()
     snprintf(buf, 6, "%5.1f", setpoint);
     tft.drawString(buf, TFT_WIDTH, 0);
     tft.setTextDatum(TC_DATUM); // top center
+    if (overshootMode)
+    {
+        tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    }
     snprintf(buf, 5, "%3d%%", (int)output);
     tft.drawString(buf, TFT_WIDTH / 2, 0);
     tft.drawFastHLine(0, tft.fontHeight(1) + 1, TFT_WIDTH, TFT_ORANGE);
 
-    // degrees
+    // degrees thermistor
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(2);
-    uint8_t len = tft.drawFloat(input, 1, 0, 12);
+    snprintf(buf, 6, "%5.1f", thermistor);
+    uint8_t len = tft.drawString(buf, 0, 12);
+    // uint8_t len = tft.drawFloat(thermistor, 1, 0, 12);
     tft.setTextFont(1);
-    tft.drawString("o", len, 12);
+    len += tft.drawString("o", len, 12);
+    // degrees from thermocouple
+    len += 4;
+    snprintf(buf, 6, "%5.1f", thermocouple);
+    // len += tft.drawFloat(thermocouple, 1, len, 12);
+    len += tft.drawString(buf, len, 19);
+    len += tft.drawString("c", len, 19);
 
     switch (menu)
     {
-    case 0:
+    case MAIN:
         // cant do that...
         // tft.fillRect(0, 12, TFT_WIDTH, TFT_HEIGHT, TFT_BLACK);
         tft.setTextDatum(TR_DATUM);
         char buf[7];
-        switch (state)
+        switch (mainScreenState)
         {
-        case 0:
+        case RESET:
             strncpy(buf, "  0.0s", 7);
             tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
             break;
-        case 1:
+        case START:
             snprintf(buf, 7, "%.1fs", float(curTime - shotTimerStart) / 1000);
             tft.setTextColor(TFT_WHITE, TFT_BLACK);
             break;
-        case 2:
+        case STOP:
             snprintf(buf, 7, "%.1fs", float(shotTimerStop - shotTimerStart) / 1000);
             tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
             break;
@@ -232,7 +311,7 @@ void updateDisplay()
         tft.setTextFont(2);
         tft.drawString(buf, TFT_WIDTH, 12);
         break;
-    case 1:
+    case SETUP:
         // show all the values, the selection is controlled by moveselecion in the FSM
         tft.setTextColor(TFT_WHITE, TFT_BLACK);
         tft.setTextFont(1);
@@ -248,15 +327,21 @@ void updateDisplay()
         tft.printf("Therm. cal:%7.2f", calibration);
         tft.setCursor(10, 90);
         tft.printf("T offset:%4.1f", temp_offset);
+        tft.setCursor(10, 100);
+        tft.printf("TC cal:%7.2f", thermocouple_offset);
+        tft.setCursor(10, 110);
+        tft.printf("overshoot:%5.2f", overshoot);
+        tft.setCursor(10, 120);
+        tft.printf("pid mode: %d", pidSource);
+        
         // uint8_t fontheight = tft.fontHeight(1);
-        if (state == 6)
+        if (setupState == QUIT)
         {
-           
-            tft.setCursor(10, 110);
+            tft.setCursor(10, 140);
             tft.setTextColor(TFT_ORANGE, TFT_BLACK);
             tft.print("save to EEPROM?");
-            
-            tft.setCursor(10, 120);
+
+            tft.setCursor(10, 150);
             if ((encoder.getCount() & 0b1) == 0)
                 tft.setTextColor(TFT_BLACK, TFT_GREEN);
             else
@@ -266,7 +351,7 @@ void updateDisplay()
                 tft.setTextColor(TFT_BLACK, TFT_RED);
             else
                 tft.setTextColor(TFT_WHITE, TFT_BLACK);
-            tft.setCursor(60, 120);
+            tft.setCursor(60, 150);
             tft.print("No");
         }
         break;
@@ -279,7 +364,13 @@ void moveSelection(uint8_t from, uint8_t to, bool visible)
     tft.fillRect(2, 40 + from * 10, 7, 7, TFT_BLACK);
     if (visible)
         tft.fillRect(2, 40 + to * 10, 7, 7, TFT_RED);
+}
 
+double round(double x, int precision)
+{
+    long factor = pow(10, precision);
+    long temp = long(x) * factor;
+    return float(temp) / factor;
 }
 
 void setup(void)
@@ -307,7 +398,6 @@ void setup(void)
     else if (backButtonBounce.read() == HIGH)
     {
         // load the values from EEPROM
-
         int addr = 0;
         setpoint = EEPROM.readDouble(addr);
         addr += sizeof(double);
@@ -320,11 +410,18 @@ void setup(void)
         calibration = EEPROM.readDouble(addr);
         addr += sizeof(double);
         temp_offset = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        thermocouple_offset = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        overshoot = EEPROM.readDouble(addr);
+        addr += sizeof(double);
+        pidSource = EEPROM.readShort(addr);
     }
     // set initial PID values
     input = 25.0;
     myPID.SetOutputLimits(0, 100);
     myPID.SetMode(AUTOMATIC);
+    myPID.SetSampleTime(pidInterval);
     analogSetAttenuation(ADC_11db);
 
     // encoder stuff
@@ -333,7 +430,7 @@ void setup(void)
     // Attache pins for use as encoder pins
     encoder.attachHalfQuad(ENCODER_DT, ENCODER_CLK);
     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-   
+
     initGraph = true;
 }
 
@@ -359,7 +456,7 @@ void loop(void)
     {
         if (backButtonBounce.read() == 0)
         {
-            update=true;
+            update = true;
             backPressed = true;
         }
     }
@@ -375,30 +472,30 @@ void loop(void)
     {
         switch (menu)
         {
-        case 0:
+        case MAIN:
             setpoint = ((double)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
-            switch (state)
+            switch (mainScreenState)
             {
-            case 0:
+            case RESET:
                 // if pressed, start timer and switch to running state
                 if (selectPressed)
                 {
                     shotTimerStart = millis();
-                    state = 1;
+                    mainScreenState = START;
                 }
                 break;
-            case 1:
+            case START:
                 // timer running, stop if pressed
                 if (selectPressed)
                 {
                     shotTimerStop = millis();
-                    state = 2;
+                    mainScreenState = STOP;
                 }
                 break;
-            case 2:
+            case STOP:
                 if (selectPressed)
                 {
-                    state = 0;
+                    mainScreenState = RESET;
                 }
                 break;
             }
@@ -406,37 +503,32 @@ void loop(void)
             {
                 tft.fillScreen(TFT_BLACK);
                 moveSelection(0, 0, true);
-                menu = 1;
-                state = 0;
+                menu = SETUP;
+                setupState = SETPOINT;
                 encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
             }
             break;
-        case 1:
+        case SETUP:
             // screen to config the values
-            switch (state)
+            switch (setupState)
             {
-            case 0:
+            case SETPOINT:
                 // roatary encoder controlls the setpoint
-                // if (previousState != 0 || previousMenu != menu)
-                // {
-                //     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-                // }
                 setpoint = ((double)encoder.getCount()) / SETPOINT_ENCODER_RESOLUTION;
                 if (selectPressed)
                 {
-                    state = 1;
+                    setupState = P;
                     encoder.setCount(Kp * PID_ENCODER_RESOLUTION);
                     moveSelection(0, 1, true);
-
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 1:
+            case P:
                 if (Kp != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
                     Kp = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
@@ -444,18 +536,18 @@ void loop(void)
                 }
                 if (selectPressed)
                 {
-                    state = 2;
+                    setupState = I;
                     encoder.setCount(Ki * PID_ENCODER_RESOLUTION);
                     moveSelection(1, 2, true);
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 2:
+            case I:
                 if (Ki != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
                     Ki = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
@@ -463,18 +555,18 @@ void loop(void)
                 }
                 if (selectPressed)
                 {
-                    state = 3;
+                    setupState = D;
                     encoder.setCount(Kd * PID_ENCODER_RESOLUTION);
                     moveSelection(2, 3, true);
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 3:
+            case D:
                 if (Kd != (((double)encoder.getCount()) / PID_ENCODER_RESOLUTION))
                 {
                     Kd = ((double)encoder.getCount()) / PID_ENCODER_RESOLUTION;
@@ -482,56 +574,101 @@ void loop(void)
                 }
                 if (selectPressed)
                 {
-                    state = 4;
+                    setupState = CAL;
                     encoder.setCount(calibration * 20.0);
                     moveSelection(3, 4, true);
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 4:
+            case CAL:
                 calibration = ((double)encoder.getCount()) / 20.0;
                 if (selectPressed)
                 {
                     encoder.setCount(temp_offset * 10.0);
-                    state = 5;
+                    setupState = TM_OFFSET;
                     moveSelection(4, 5, true);
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 5:
+            case TM_OFFSET:
                 temp_offset = ((double)encoder.getCount()) / 10.0;
                 if (selectPressed)
                 {
-                    encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-                    state = 0;
-                    moveSelection(5, 0, true);
+                    encoder.setCount(thermocouple_offset * 10.0);
+                    setupState = TC_OFFSET;
+                    moveSelection(5, 6, true);
                 }
                 if (backPressed)
                 {
-                    state = 6;
+                    setupState = QUIT;
                     encoder.setCount(0);
                     moveSelection(0, 0, false);
                 }
                 break;
-            case 6:
+            case TC_OFFSET:
+                thermocouple_offset = ((double)encoder.getCount()) / 10.0;
+                if (selectPressed)
+                {
+                    encoder.setCount(overshoot * 10.0);
+                    setupState = OVERSHOOT;
+                    moveSelection(6, 7, true);
+                }
+                if (backPressed)
+                {
+                    setupState = QUIT;
+                    encoder.setCount(0);
+                    moveSelection(0, 0, false);
+                }
+                break;
+            case OVERSHOOT:
+                overshoot = double(encoder.getCount()) / 10.0;
+                if (selectPressed)
+                {
+                    encoder.setCount(pidSource);
+                    setupState = PID_MODE;
+                    moveSelection(7, 8, true);
+                }
+                if (backPressed)
+                {
+                    setupState = QUIT;
+                    encoder.setCount(0);
+                    moveSelection(0, 0, false);
+                }
+                break;
+            case PID_MODE:
+                pidSource = abs(encoder.getCount() % 3);
+                if (selectPressed)
+                {
+                    encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
+                    setupState = SETPOINT;
+                    moveSelection(8, 0, true);
+                }
+                if (backPressed)
+                {
+                    setupState = QUIT;
+                    encoder.setCount(0);
+                    moveSelection(0, 0, false);
+                }
+                break;
+            case QUIT:
                 if (selectPressed)
                 {
                     if ((encoder.getCount() & 0b1) == 0)
                     {
                         saveValues();
                     }
-                    menu = 0;
-                    state = 0;
+                    menu = MAIN;
+                    mainScreenState = RESET;
                     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
                     tft.fillScreen(TFT_BLACK);
                     initGraph = true;
@@ -540,7 +677,7 @@ void loop(void)
                 if (backPressed)
                 {
                     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-                    state = 0;
+                    setupState = SETPOINT;
                     tft.fillScreen(TFT_BLACK);
                     moveSelection(0, 0, true);
                 }
@@ -549,51 +686,83 @@ void loop(void)
             break;
         }
     }
-    if (looptime % 50 == 0)
+    unsigned long curTime = millis();
+    if (curTime - previousDisplayTime >= displayInterval)
     {
-        // measure temp
-        uint8_t i;
-        float average;
+        previousDisplayTime = curTime;
+        updateDisplay();
+    }
+    curTime = millis();
+    // gather adc samples before computing the PID vals
+    if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
+    {
+        previousADCSampleTime = curTime;
+        ThermistorSamples += analogRead(THERMISTOR_PIN);
+        ThermocoupleSamples += analogRead(THERMOCOUPLE_PIN);
+        currentADCSample++;
+    }
+    curTime = millis();
+    if (curTime - previousPidTime >= pidInterval)
+    {
+        previousPidTime = curTime;
 
-        // take N samples in a row, with a slight delay
-        for (i = 0; i < NUMSAMPLES; i++)
-        {
-            samples[i] = analogRead(THERMISTOR_PIN);
-        }
-        // average all the samples out
-        average = 0;
-        for (i = 0; i < NUMSAMPLES; i++)
-        {
-            average += samples[i];
-        }
-        average /= NUMSAMPLES;
-        // convert the value to resistance
-        average = 4095 / average - 1;
-        average = SERIESRESISTOR / average;
-        // calculate actual temp
-        float steinhart;
-        steinhart = average / THERMISTORNOMINAL;          // (R/Ro)
+        startADCSampleTime = (previousPidTime + pidInterval) - NUMSAMPLES * ADCSampleInterval;
+        // compute the temps from adc samples
+        float steinhart = float(ThermistorSamples) / float(currentADCSample);
+        steinhart = (4095 / steinhart) - 1;
+        steinhart = SERIESRESISTOR / steinhart;
+        steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
         steinhart = log(steinhart);                       // ln(R/Ro)
         steinhart /= BCOEFFICIENT;                        // 1/B * ln(R/Ro)
         steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
         steinhart = 1.0 / steinhart;                      // Invert
         steinhart -= 273.15;                              // convert absolute temp to C
         steinhart += calibration;
-        input = steinhart + temp_offset;
+        thermistor = steinhart;
+
+        float thermocouple_voltage = ((float(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
+        thermocouple = (thermocouple_voltage - 1.25) / 0.005 + thermocouple_offset;
+
+        switch (pidSource)
+        {
+        case 0:
+            input = thermistor;
+            break;
+        case 1:
+            input = thermocouple;
+            break;
+        case 2:
+            input = (thermistor + thermocouple) / 2;
+        }
+        input += temp_offset;
+        // use more aggressive tunings when far away from setpoint
+        if (!overshootMode && abs(input - setpoint) >= overshoot)
+        {
+            overshootMode = true;
+            myPID.SetTunings(aKp, aKi, aKd);
+        }
+        else if (overshootMode && abs(input - setpoint) < overshoot)
+        {
+            overshootMode = false;
+            myPID.SetTunings(Kp, Ki, Kd);
+        }
+
         myPID.Compute();
-        updateDisplay();
+        ThermistorSamples = 0;
+        ThermocoupleSamples = 0;
+        currentADCSample = 0;
     }
-    // save to the array for the graphics
-    if (looptime % 500 == 0)
+    curTime = millis();
+    if (curTime - previousGraphTime >= graphInterval)
     {
+        previousGraphTime = curTime;
         graphX = (graphX + 1) % TFT_WIDTH;
         Serial.println(String(input) + ", " + String(output));
-        updateGraph(input, output, initGraph);
+        updateGraph(thermistor, thermocouple, output, initGraph);
         initGraph = false;
     }
-
     // output logic for the SSR
-    unsigned long curTime = millis();
+    curTime = millis();
     if (curTime - windowStartTime > windowSize)
     {
         windowStartTime += windowSize;
