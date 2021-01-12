@@ -6,6 +6,8 @@
 #include <SPI.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
+#include <Adafruit_ADS1015.h>
+
 
 //// these pins are defined in user_setup.h in the tft_espi library
 // here just for reference
@@ -19,10 +21,10 @@
 #define THERMISTOR_PIN 34 
 #define THERMOCOUPLE_PIN 35
 #define SSR_PIN 13
-#define ENCODER_BUTTON_PIN 22
+#define ENCODER_BUTTON_PIN 32
 #define BACK_BUTTON_PIN 14
-#define ENCODER_CLK 21
-#define ENCODER_DT 19
+#define ENCODER_CLK 33
+#define ENCODER_DT 25
 // resistance at 25 degrees C
 #define THERMISTORNOMINAL 100000
 // temp. for nominal resistance (almost always 25 C)
@@ -82,6 +84,9 @@ unsigned long shotTimerStart;
 unsigned long shotTimerStop;
 bool timerRunning;
 bool initGraph = false;
+
+// external ADC, since the one on esp32 is shite
+Adafruit_ADS1015 ads(0x48);
 
 enum SetupStates
 {
@@ -430,7 +435,8 @@ void setup(void)
     // Attache pins for use as encoder pins
     encoder.attachHalfQuad(ENCODER_DT, ENCODER_CLK);
     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-
+    ads.setGain(GAIN_ONE);
+    ads.begin();
     initGraph = true;
 }
 
@@ -694,22 +700,28 @@ void loop(void)
     }
     curTime = millis();
     // gather adc samples before computing the PID vals
-    if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
-    {
-        previousADCSampleTime = curTime;
-        ThermistorSamples += analogRead(THERMISTOR_PIN);
-        ThermocoupleSamples += analogRead(THERMOCOUPLE_PIN);
-        currentADCSample++;
-    }
+    // if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
+    // {
+    //     previousADCSampleTime = curTime;
+    //     uint16_t temp = analogRead(THERMISTOR_PIN);
+    //     ThermistorSamples += temp;
+    //     Serial.print(temp);
+    //     temp = analogRead(THERMOCOUPLE_PIN);
+    //     ThermocoupleSamples += temp;
+    //     Serial.print(", ");
+    //     Serial.println(temp);
+    //     currentADCSample++;
+    // }
     curTime = millis();
     if (curTime - previousPidTime >= pidInterval)
     {
         previousPidTime = curTime;
-
-        startADCSampleTime = (previousPidTime + pidInterval) - NUMSAMPLES * ADCSampleInterval;
+        Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
+        startADCSampleTime = (curTime + pidInterval) - NUMSAMPLES * ADCSampleInterval;
         // compute the temps from adc samples
-        float steinhart = float(ThermistorSamples) / float(currentADCSample);
-        steinhart = (4095 / steinhart) - 1;
+        // float steinhart = float(ThermistorSamples) / float(currentADCSample);
+        double steinhart = double(ads.readADC_SingleEnded(0));
+        steinhart = (((3.3/4.096) * 2047.0) / steinhart) - 1;
         steinhart = SERIESRESISTOR / steinhart;
         steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
         steinhart = log(steinhart);                       // ln(R/Ro)
@@ -720,9 +732,9 @@ void loop(void)
         steinhart += calibration;
         thermistor = steinhart;
 
-        float thermocouple_voltage = ((float(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
-        thermocouple = (thermocouple_voltage - 1.25) / 0.005 + thermocouple_offset;
-
+        // float thermocouple_voltage = ((float(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
+        float thermocouple_voltage = float(ads.readADC_SingleEnded(2)* 4.096 / 2047);
+        thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
         switch (pidSource)
         {
         case 0:
@@ -757,7 +769,7 @@ void loop(void)
     {
         previousGraphTime = curTime;
         graphX = (graphX + 1) % TFT_WIDTH;
-        Serial.println(String(input) + ", " + String(output));
+        // Serial.println(String(input) + ", " + String(output));
         updateGraph(thermistor, thermocouple, output, initGraph);
         initGraph = false;
     }
