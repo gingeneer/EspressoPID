@@ -38,7 +38,7 @@
 #define SERIESRESISTOR 9850
 // how many speps per degree
 #define SETPOINT_ENCODER_RESOLUTION 2.0
-#define PID_ENCODER_RESOLUTION 100.0
+#define PID_ENCODER_RESOLUTION 10.0
 
 #define EEPROM_SIZE 1000
 
@@ -80,7 +80,7 @@ PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
 // autotune variables:
 double aTuneStep = 50, aTuneNoise = 0.2, aTuneStartValue = 50;
-unsigned int aTuneLookBack = 10;
+unsigned int aTuneLookBack = 30;
 boolean tuning = false;
 // y tho?
 byte ATuneModeRemember = 2;
@@ -469,6 +469,7 @@ void setup(void)
     myPID.SetMode(AUTOMATIC);
     myPID.SetSampleTime(pidInterval);
     analogSetAttenuation(ADC_11db);
+    myPID.SetTunings(Kp, Ki, Kd);
 
     if (tuning)
     {
@@ -476,6 +477,8 @@ void setup(void)
         changeAutoTune();
         tuning = true;
     }
+    // set control type to PID
+    aTune.SetControlType(1); 
 
     // encoder stuff
     // Enable the weak pull up resistors
@@ -682,7 +685,7 @@ void loop(void)
                 thermocouple_offset = ((double)encoder.getCount()) / 10.0;
                 if (selectPressed)
                 {
-                    encoder.setCount(overshoot * 10.0);
+                    encoder.setCount(overshoot * 2.0);
                     setupState = OVERSHOOT;
                     moveSelection(6, 7, true);
                 }
@@ -694,7 +697,7 @@ void loop(void)
                 }
                 break;
             case OVERSHOOT:
-                overshoot = double(encoder.getCount()) / 10.0;
+                overshoot = double(encoder.getCount()) / 2.0;
                 if (selectPressed)
                 {
                     encoder.setCount(pidSource);
@@ -759,20 +762,20 @@ void loop(void)
         previousDisplayTime = curTime;
         updateDisplay();
     }
-    // curTime = millis();
+    curTime = millis();
     // gather adc samples before computing the PID vals
-    // if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
-    // {
-    //     previousADCSampleTime = curTime;
-    //     uint16_t temp = analogRead(THERMISTOR_PIN);
-    //     ThermistorSamples += temp;
-    //     Serial.print(temp);
-    //     temp = analogRead(THERMOCOUPLE_PIN);
-    //     ThermocoupleSamples += temp;
-    //     Serial.print(", ");
-    //     Serial.println(temp);
-    //     currentADCSample++;
-    // }
+    if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
+    {
+        previousADCSampleTime = curTime;
+        uint16_t temp = ads.readADC_SingleEnded(0);
+        ThermistorSamples += temp;
+        // Serial.print(temp);
+        temp = ads.readADC_SingleEnded(2);
+        ThermocoupleSamples += temp;
+        // Serial.print(", ");
+        // Serial.println(temp);
+        currentADCSample++;
+    }
     curTime = millis();
     if (curTime - previousPidTime >= pidInterval)
     {
@@ -780,8 +783,8 @@ void loop(void)
         Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
         startADCSampleTime = (curTime + pidInterval) - NUMSAMPLES * ADCSampleInterval;
         // compute the temps from adc samples
-        // float steinhart = float(ThermistorSamples) / float(currentADCSample);
-        double steinhart = double(ads.readADC_SingleEnded(0));
+        double steinhart = double(ThermistorSamples) / double(currentADCSample);
+        // double steinhart = double(ads.readADC_SingleEnded(0));
         steinhart = (((3.3 / 4.096) * 2047.0) / steinhart) - 1;
         steinhart = SERIESRESISTOR / steinhart;
         steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
@@ -793,8 +796,8 @@ void loop(void)
         steinhart += calibration;
         thermistor = steinhart;
 
-        // float thermocouple_voltage = ((float(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
-        float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
+        double thermocouple_voltage = ((double(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
+        // float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
         thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
         switch (pidSource)
         {
@@ -808,17 +811,7 @@ void loop(void)
             input = (thermistor + thermocouple) / 2;
         }
         input += temp_offset;
-        // use more aggressive tunings when far away from setpoint
-        // if (!overshootMode && abs(input - setpoint) >= overshoot)
-        // {
-        //     overshootMode = true;
-        //     myPID.SetTunings(aKp, aKi, aKd);
-        // }
-        // else if (overshootMode && abs(input - setpoint) < overshoot)
-        // {
-        //     overshootMode = false;
-        //     myPID.SetTunings(Kp, Ki, Kd);
-        // }
+        
 
         // myPID.Compute();
         ThermistorSamples = 0;
@@ -851,7 +844,21 @@ void loop(void)
         }
     }
     else
+    {
+        // use more aggressive tunings when far away from setpoint
+        if (!overshootMode && abs(input - setpoint) >= overshoot)
+        {
+            overshootMode = true;
+            myPID.SetTunings(aKp, aKi, aKd);
+        }
+        else if (overshootMode && abs(input - setpoint) < overshoot)
+        {
+            overshootMode = false;
+            myPID.SetTunings(Kp, Ki, Kd);
+        }
         myPID.Compute();
+    }
+        
     // output logic for the SSR
     curTime = millis();
     if (curTime - windowStartTime > windowSize)
