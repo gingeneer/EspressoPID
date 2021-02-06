@@ -1,13 +1,13 @@
 #include "EEPROM.h"
+#include <Adafruit_ADS1015.h>
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
+#include <PID_AutoTune_v0.h>
 #include <PID_v1.h>
 #include <SPI.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
-#include <Adafruit_ADS1015.h>
-
 
 //// these pins are defined in user_setup.h in the tft_espi library
 // here just for reference
@@ -18,7 +18,7 @@
 // #define TFT_DC    2  // Data Command control pin
 // #define TFT_RST   4  // Reset pin (could connect to RST pin)
 
-#define THERMISTOR_PIN 34 
+#define THERMISTOR_PIN 34
 #define THERMOCOUPLE_PIN 35
 #define SSR_PIN 13
 #define ENCODER_BUTTON_PIN 32
@@ -52,8 +52,8 @@ ESP32Encoder encoder;
 
 // how many samples to take and average, more takes longer
 // but is more 'smooth' (NUMSAMPLE*ADCSampleInterval < pidInterval)
-#define NUMSAMPLES 20
-const int displayInterval = 50, graphInterval = 500, pidInterval = 250, ADCSampleInterval = 5;
+#define NUMSAMPLES 5
+const int displayInterval = 50, graphInterval = 500, pidInterval = 100, ADCSampleInterval = 5;
 unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousADCSampleTime = 0, startADCSampleTime = 0;
 uint8_t currentADCSample = 0;
 uint32_t ThermistorSamples, ThermocoupleSamples;
@@ -77,6 +77,15 @@ double aKp = 100, aKi = 0, aKd = 0;
 // 2: avg(thermistor, thermocouple)
 uint8_t pidSource = 0;
 PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
+
+// autotune variables:
+double aTuneStep = 50, aTuneNoise = 0.2, aTuneStartValue = 50;
+unsigned int aTuneLookBack = 10;
+boolean tuning = false;
+// y tho?
+byte ATuneModeRemember = 2;
+
+PID_ATune aTune(&input, &output);
 // how long is one period of SSR control in ms
 int windowSize = 500;
 unsigned long windowStartTime;
@@ -124,6 +133,7 @@ uint8_t previousMenu = 0;
 uint8_t graphX = 0;
 uint8_t selection = 0;
 bool longPressPossible = false;
+bool longBackPossible = false;
 
 Bounce encoderBounce = Bounce();
 Bounce backButtonBounce = Bounce();
@@ -271,6 +281,10 @@ void updateDisplay()
     {
         tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     }
+    if (tuning)
+    {
+        tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    }
     snprintf(buf, 5, "%3d%%", (int)output);
     tft.drawString(buf, TFT_WIDTH / 2, 0);
     tft.drawFastHLine(0, tft.fontHeight(1) + 1, TFT_WIDTH, TFT_ORANGE);
@@ -338,7 +352,7 @@ void updateDisplay()
         tft.printf("overshoot:%5.2f", overshoot);
         tft.setCursor(10, 120);
         tft.printf("pid mode: %d", pidSource);
-        
+
         // uint8_t fontheight = tft.fontHeight(1);
         if (setupState == QUIT)
         {
@@ -376,6 +390,33 @@ double round(double x, int precision)
     long factor = pow(10, precision);
     long temp = long(x) * factor;
     return float(temp) / factor;
+}
+
+void AutoTuneHelper(boolean start)
+{
+    if (start)
+        ATuneModeRemember = myPID.GetMode();
+    else
+        myPID.SetMode(ATuneModeRemember);
+}
+void changeAutoTune()
+{
+    if (!tuning)
+    {
+        //Set the output to the desired starting frequency.
+        output = aTuneStartValue;
+        aTune.SetNoiseBand(aTuneNoise);
+        aTune.SetOutputStep(aTuneStep);
+        aTune.SetLookbackSec((int)aTuneLookBack);
+        AutoTuneHelper(true);
+        tuning = true;
+    }
+    else
+    { //cancel autotune
+        aTune.Cancel();
+        tuning = false;
+        AutoTuneHelper(false);
+    }
 }
 
 void setup(void)
@@ -429,6 +470,13 @@ void setup(void)
     myPID.SetSampleTime(pidInterval);
     analogSetAttenuation(ADC_11db);
 
+    if (tuning)
+    {
+        tuning = false;
+        changeAutoTune();
+        tuning = true;
+    }
+
     // encoder stuff
     // Enable the weak pull up resistors
     ESP32Encoder::useInternalWeakPullResistors = UP;
@@ -449,6 +497,7 @@ void loop(void)
     bool backPressed = false;
     bool longSelect = false;
     bool update = false;
+    bool longBack = false;
     if (encoderBounce.changed())
     {
         if (encoderBounce.read() == 0)
@@ -464,15 +513,23 @@ void loop(void)
         {
             update = true;
             backPressed = true;
+            longBackPossible = true;
         }
     }
     // check for longpress
-    if (encoderBounce.read() == 0 && encoderBounce.duration() > 3000 && longPressPossible)
+    if (encoderBounce.read() == 0 && encoderBounce.duration() > 2000 && longPressPossible)
     {
         longSelect = true;
         longPressPossible = false;
         update = true;
     }
+    if (backButtonBounce.read() == 0 && backButtonBounce.duration() > 2000 && longBackPossible)
+    {
+        longBack = true;
+        longBackPossible = false;
+        update = true;
+    }
+
     // FSM update
     if (looptime % 20 == 0 || update)
     {
@@ -691,6 +748,10 @@ void loop(void)
             }
             break;
         }
+        if (longBack)
+        {
+            changeAutoTune();
+        }
     }
     unsigned long curTime = millis();
     if (curTime - previousDisplayTime >= displayInterval)
@@ -698,7 +759,7 @@ void loop(void)
         previousDisplayTime = curTime;
         updateDisplay();
     }
-    curTime = millis();
+    // curTime = millis();
     // gather adc samples before computing the PID vals
     // if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
     // {
@@ -721,7 +782,7 @@ void loop(void)
         // compute the temps from adc samples
         // float steinhart = float(ThermistorSamples) / float(currentADCSample);
         double steinhart = double(ads.readADC_SingleEnded(0));
-        steinhart = (((3.3/4.096) * 2047.0) / steinhart) - 1;
+        steinhart = (((3.3 / 4.096) * 2047.0) / steinhart) - 1;
         steinhart = SERIESRESISTOR / steinhart;
         steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
         steinhart = log(steinhart);                       // ln(R/Ro)
@@ -733,7 +794,7 @@ void loop(void)
         thermistor = steinhart;
 
         // float thermocouple_voltage = ((float(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
-        float thermocouple_voltage = float(ads.readADC_SingleEnded(2)* 4.096 / 2047);
+        float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
         thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
         switch (pidSource)
         {
@@ -748,18 +809,18 @@ void loop(void)
         }
         input += temp_offset;
         // use more aggressive tunings when far away from setpoint
-        if (!overshootMode && abs(input - setpoint) >= overshoot)
-        {
-            overshootMode = true;
-            myPID.SetTunings(aKp, aKi, aKd);
-        }
-        else if (overshootMode && abs(input - setpoint) < overshoot)
-        {
-            overshootMode = false;
-            myPID.SetTunings(Kp, Ki, Kd);
-        }
+        // if (!overshootMode && abs(input - setpoint) >= overshoot)
+        // {
+        //     overshootMode = true;
+        //     myPID.SetTunings(aKp, aKi, aKd);
+        // }
+        // else if (overshootMode && abs(input - setpoint) < overshoot)
+        // {
+        //     overshootMode = false;
+        //     myPID.SetTunings(Kp, Ki, Kd);
+        // }
 
-        myPID.Compute();
+        // myPID.Compute();
         ThermistorSamples = 0;
         ThermocoupleSamples = 0;
         currentADCSample = 0;
@@ -773,6 +834,24 @@ void loop(void)
         updateGraph(thermistor, thermocouple, output, initGraph);
         initGraph = false;
     }
+    if (tuning)
+    {
+        byte val = (aTune.Runtime());
+        if (val != 0)
+        {
+            tuning = false;
+        }
+        if (!tuning)
+        { //we're done, set the tuning parameters
+            Kp = aTune.GetKp();
+            Ki = aTune.GetKi();
+            Kd = aTune.GetKd();
+            myPID.SetTunings(Kp, Ki, Kd);
+            AutoTuneHelper(false);
+        }
+    }
+    else
+        myPID.Compute();
     // output logic for the SSR
     curTime = millis();
     if (curTime - windowStartTime > windowSize)
