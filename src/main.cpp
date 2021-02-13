@@ -44,9 +44,9 @@
 
 // uint16_t tempArray[TFT_WIDTH];
 // uint8_t outputArray[TFT_WIDTH];
-uint8_t previousTempY = 0;
-uint8_t previousTemp2Y = 0;
-uint8_t previousDutyY = 40;
+int previousTempY = 0;
+int previousTemp2Y = 0;
+int previousDutyY = 40;
 
 ESP32Encoder encoder;
 
@@ -56,7 +56,7 @@ ESP32Encoder encoder;
 const int displayInterval = 50, graphInterval = 500, pidInterval = 100, ADCSampleInterval = 5;
 unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousADCSampleTime = 0, startADCSampleTime = 0;
 uint8_t currentADCSample = 0;
-uint32_t ThermistorSamples, ThermocoupleSamples;
+long ThermistorSamples, ThermocoupleSamples;
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
 float thermistor, thermocouple;
@@ -65,6 +65,7 @@ double setpoint = 105, input, output;
 double calibration = -2.3;
 double overshoot = 2.0;
 bool overshootMode = false;
+bool startup = true;
 //offset for display (what boiler temp equals which water temp)
 double temp_offset = 0;
 double thermocouple_offset;
@@ -168,29 +169,42 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
     if (menu != MAIN)
         return;
     // min/max temp
-    const uint8_t min = 80;
-    const uint8_t max = 120;
+    const int min = 70;
+    const int max = 120;
     // height of graphing area
-    const uint8_t height = 120;
+    const int height = 240;
     // how many pixel per temp
     float scale = float(height) / (float(max) - min);
-    uint8_t nextIndex = (graphX + 1) % TFT_WIDTH;
-    uint8_t tempY = TFT_HEIGHT - uint8_t(((temp1 - min) * scale + 0.5));
-    uint8_t temp2Y = TFT_HEIGHT - uint8_t(((temp2 - min) * scale + 0.5));
-    uint8_t dutyCycleY = TFT_HEIGHT - uint8_t(dutycycle * (float(height) / 100.0f) + 0.5);
+    int nextIndex = (graphX + 1) % TFT_WIDTH;
+    int tempY = TFT_HEIGHT - int(((temp1 - min) * scale + 0.5));
+    int temp2Y = TFT_HEIGHT - int(((temp2 - min) * scale + 0.5));
+    // int dutyCycleY = TFT_HEIGHT - int(dutycycle * ((float(max) / 100.0f) + 0.5);
+    int dutyCycleY = TFT_HEIGHT - int(dutycycle * ((float(80 - min) * scale) / 100.0f) + 0.5);
     if (dutyCycleY == TFT_HEIGHT)
         dutyCycleY = TFT_HEIGHT - 1;
     // draw the graph from back to front
     // legend
     uint8_t len = tft.textWidth("100", 1);
     tft.drawFastVLine(graphX, TFT_HEIGHT - height - 4, height + 4, TFT_BLACK);
+    // tft.drawPixel(graphX, TFT_HEIGHT - int((70 - min) * scale + 0.5), TFT_DARKGREY);
+    tft.drawPixel(graphX, TFT_HEIGHT - int((80 - min) * scale + 0.5), TFT_DARKGREY);
     tft.drawPixel(graphX, TFT_HEIGHT - int((90 - min) * scale + 0.5), TFT_DARKGREY);
     tft.drawPixel(graphX, TFT_HEIGHT - int((110 - min) * scale + 0.5), TFT_DARKGREY);
+    // tft.drawPixel(graphX, TFT_HEIGHT - int((120 - min) * scale + 0.5), TFT_DARKGREY);
+    // tft.drawPixel(graphX, TFT_HEIGHT - int((130 - min) * scale + 0.5), TFT_DARKGREY);
+    // tft.drawPixel(graphX, TFT_HEIGHT - int((140 - min) * scale + 0.5), TFT_DARKGREY);
+    // tft.drawPixel(graphX, TFT_HEIGHT - int((150 - min) * scale + 0.5), TFT_DARKGREY);
     if (initialize)
     {
+        // tft.drawFastHLine(0, TFT_HEIGHT - int((70 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        tft.drawFastHLine(0, TFT_HEIGHT - int((80 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
         tft.drawFastHLine(0, TFT_HEIGHT - int((90 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
-        tft.drawFastHLine(len, TFT_HEIGHT - int((100 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        tft.drawFastHLine(len, TFT_HEIGHT - int((100 - min) * scale + 0.5), TFT_WIDTH, TFT_LIGHTGREY);
         tft.drawFastHLine(0, TFT_HEIGHT - int((110 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        // tft.drawFastHLine(0, TFT_HEIGHT - int((120 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        // tft.drawFastHLine(0, TFT_HEIGHT - int((130 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        // tft.drawFastHLine(0, TFT_HEIGHT - int((140 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
+        // tft.drawFastHLine(0, TFT_HEIGHT - int((150 - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
         tft.drawFastHLine(len, TFT_HEIGHT - int((max - min) * scale + 0.5), TFT_WIDTH, TFT_DARKGREY);
     }
     if (graphX <= len || initialize)
@@ -198,7 +212,7 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
         tft.setTextDatum(BL_DATUM);
         tft.setTextFont(1);
         tft.setTextSize(1);
-        tft.setTextColor(TFT_DARKGREY);
+        tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
         tft.drawNumber(min, 0, TFT_HEIGHT);
         tft.setTextDatum(CL_DATUM);
         tft.drawNumber(100, 0, TFT_HEIGHT - int((100.0 - min) * scale + 0.5));
@@ -209,22 +223,34 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
     }
     else
     {
-        tft.drawPixel(graphX, TFT_HEIGHT - int((100 - min) * scale + 0.5), TFT_DARKGREY);
+        tft.drawPixel(graphX, TFT_HEIGHT - int((100 - min) * scale + 0.5), TFT_LIGHTGREY);
         tft.drawPixel(graphX, TFT_HEIGHT - int((max - min) * scale + 0.5), TFT_DARKGREY);
     }
-
-    if (dutyCycleY > previousDutyY)
+    if (graphX <= 1)
     {
-        tft.drawFastVLine(graphX, previousDutyY, dutyCycleY - previousDutyY + 1, TFT_GREEN);
+        previousTempY = tempY;
+        previousTemp2Y = temp2Y;
+        previousDutyY = dutyCycleY;
     }
-    else if (dutyCycleY < previousDutyY)
+    if (previousTempY < TFT_HEIGHT - height)
     {
-        tft.drawFastVLine(graphX, dutyCycleY, previousDutyY - dutyCycleY + 1, TFT_GREEN);
+        previousTempY = TFT_HEIGHT - height;
     }
-    else
-    {
-        tft.drawPixel(graphX, dutyCycleY, TFT_GREEN);
-    }
+    // following code is for dutycycle line, like temp
+    // if (dutyCycleY > previousDutyY)
+    // {
+    //     tft.drawFastVLine(graphX, previousDutyY, dutyCycleY - previousDutyY + 1, TFT_GREEN);
+    // }
+    // else if (dutyCycleY < previousDutyY)
+    // {
+    //     tft.drawFastVLine(graphX, dutyCycleY, previousDutyY - dutyCycleY + 1, TFT_GREEN);
+    // }
+    // else
+    // {
+    //     tft.drawPixel(graphX, dutyCycleY, TFT_GREEN);
+    // }
+    // draw like a bar at bottom
+    tft.drawFastVLine(graphX, dutyCycleY, TFT_HEIGHT - dutyCycleY, TFT_GREEN);
     if (temp1 >= min && temp1 <= max)
     {
         if (tempY > previousTempY)
@@ -256,6 +282,11 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
         }
     }
     tft.drawFastVLine(nextIndex, TFT_HEIGHT - height - 4, height + 4, TFT_WHITE);
+    if (nextIndex < TFT_WIDTH - 1)
+    {
+        tft.drawFastVLine(nextIndex + 1, TFT_HEIGHT - height - 4, height + 4, TFT_WHITE);
+    }
+
     previousDutyY = dutyCycleY;
     previousTempY = tempY;
     previousTemp2Y = temp2Y;
@@ -269,11 +300,12 @@ void updateDisplay()
     // Set the font colour to be white with a black background, set text size multiplier to 1
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(1);
+    tft.setTextFont(2);
     int uptime_mins = curTime / (1000 * 60);
     int uptime_secs = (curTime / (1000)) % 60;
     tft.printf("%3d:%02d", uptime_mins, uptime_secs);
     tft.setTextDatum(TR_DATUM); // top right]
-    char buf[6];
+    char buf[12];
     snprintf(buf, 6, "%5.1f", setpoint);
     tft.drawString(buf, TFT_WIDTH, 0);
     tft.setTextDatum(TC_DATUM); // top center
@@ -285,25 +317,32 @@ void updateDisplay()
     {
         tft.setTextColor(TFT_GREEN, TFT_BLACK);
     }
+    if (startup)
+    {
+        tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+    }
     snprintf(buf, 5, "%3d%%", (int)output);
     tft.drawString(buf, TFT_WIDTH / 2, 0);
-    tft.drawFastHLine(0, tft.fontHeight(1) + 1, TFT_WIDTH, TFT_ORANGE);
+    tft.drawFastHLine(0, tft.fontHeight(2) + 1, TFT_WIDTH, TFT_ORANGE);
 
+    uint8_t curHeight = tft.fontHeight(2) + 5;
     // degrees thermistor
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
-    tft.setTextFont(2);
-    snprintf(buf, 6, "%5.1f", thermistor);
-    uint8_t len = tft.drawString(buf, 0, 12);
+    tft.setTextFont(4);
+    // tft.fillRect(0, curHeight, TFT_WIDTH/2, tft.fontHeight(4), TFT_BLACK);
+    snprintf(buf, 11, "%6.1f`C    ", thermistor);
+    uint8_t len = tft.drawString(buf, 0, curHeight);
+    // tft.drawChar(223, len, curHeight)
     // uint8_t len = tft.drawFloat(thermistor, 1, 0, 12);
-    tft.setTextFont(1);
-    len += tft.drawString("o", len, 12);
+    // tft.setTextFont(2);
+    // len += tft.drawString("o", len, curHeight);
     // degrees from thermocouple
-    len += 4;
-    snprintf(buf, 6, "%5.1f", thermocouple);
+    // len += 4;
+    // snprintf(buf, 6, "%5.1f", thermocouple);
     // len += tft.drawFloat(thermocouple, 1, len, 12);
-    len += tft.drawString(buf, len, 19);
-    len += tft.drawString("c", len, 19);
+    // len += tft.drawString(buf, len, curHeight);
+    // len += tft.drawString("c", len, curHeight);
 
     switch (menu)
     {
@@ -327,40 +366,51 @@ void updateDisplay()
             tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
             break;
         }
-        tft.setTextFont(2);
-        tft.drawString(buf, TFT_WIDTH, 12);
+        tft.setTextFont(4);
+        tft.drawString(buf, TFT_WIDTH, curHeight);
         break;
     case SETUP:
         // show all the values, the selection is controlled by moveselecion in the FSM
+        int curLine = 60;
+        int lineIncr = 10;
         tft.setTextColor(TFT_WHITE, TFT_BLACK);
         tft.setTextFont(1);
-        tft.setCursor(10, 40);
+        tft.setCursor(10, curLine);
         tft.printf("setpoint: %7.2f", setpoint);
-        tft.setCursor(10, 50);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("P: %6.3f", Kp);
-        tft.setCursor(10, 60);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("I: %6.3f", Ki);
-        tft.setCursor(10, 70);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("D: %6.3f", Kd);
-        tft.setCursor(10, 80);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("Therm. cal:%7.2f", calibration);
-        tft.setCursor(10, 90);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("T offset:%4.1f", temp_offset);
-        tft.setCursor(10, 100);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("TC cal:%7.2f", thermocouple_offset);
-        tft.setCursor(10, 110);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("overshoot:%5.2f", overshoot);
-        tft.setCursor(10, 120);
+        curLine += lineIncr;
+        tft.setCursor(10, curLine);
         tft.printf("pid mode: %d", pidSource);
+        curLine += lineIncr;
 
         // uint8_t fontheight = tft.fontHeight(1);
         if (setupState == QUIT)
         {
-            tft.setCursor(10, 140);
+            tft.setCursor(10, curLine);
             tft.setTextColor(TFT_ORANGE, TFT_BLACK);
             tft.print("save to EEPROM?");
-
-            tft.setCursor(10, 150);
+            curLine += lineIncr;
+            tft.setCursor(10, curLine);
             if ((encoder.getCount() & 0b1) == 0)
                 tft.setTextColor(TFT_BLACK, TFT_GREEN);
             else
@@ -370,7 +420,7 @@ void updateDisplay()
                 tft.setTextColor(TFT_BLACK, TFT_RED);
             else
                 tft.setTextColor(TFT_WHITE, TFT_BLACK);
-            tft.setCursor(60, 150);
+            tft.setCursor(60, curLine);
             tft.print("No");
         }
         break;
@@ -380,9 +430,9 @@ void updateDisplay()
 void moveSelection(uint8_t from, uint8_t to, bool visible)
 {
     // 0-5: x: 2, y: 42+x*10, cursor 6x6 rect
-    tft.fillRect(2, 40 + from * 10, 7, 7, TFT_BLACK);
+    tft.fillRect(2, 60 + from * 10, 7, 7, TFT_BLACK);
     if (visible)
-        tft.fillRect(2, 40 + to * 10, 7, 7, TFT_RED);
+        tft.fillRect(2, 60 + to * 10, 7, 7, TFT_RED);
 }
 
 double round(double x, int precision)
@@ -426,7 +476,7 @@ void setup(void)
     pinMode(SSR_PIN, OUTPUT);
     // initialize the TFT
     tft.init();
-    tft.setRotation(2);
+    tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
     encoderBounce.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
     encoderBounce.interval(25);
@@ -478,7 +528,7 @@ void setup(void)
         tuning = true;
     }
     // set control type to PID
-    aTune.SetControlType(1); 
+    aTune.SetControlType(1);
 
     // encoder stuff
     // Enable the weak pull up resistors
@@ -780,8 +830,8 @@ void loop(void)
     if (curTime - previousPidTime >= pidInterval)
     {
         previousPidTime = curTime;
-        Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
-        startADCSampleTime = (curTime + pidInterval) - NUMSAMPLES * ADCSampleInterval;
+        // Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
+        startADCSampleTime = (curTime + pidInterval) - (NUMSAMPLES + 1) * ADCSampleInterval;
         // compute the temps from adc samples
         double steinhart = double(ThermistorSamples) / double(currentADCSample);
         // double steinhart = double(ads.readADC_SingleEnded(0));
@@ -811,12 +861,27 @@ void loop(void)
             input = (thermistor + thermocouple) / 2;
         }
         input += temp_offset;
-        
 
         // myPID.Compute();
         ThermistorSamples = 0;
         ThermocoupleSamples = 0;
         currentADCSample = 0;
+
+        if (!tuning)
+        {
+            // use more aggressive tunings when far away from setpoint
+            if (!overshootMode && abs(input - setpoint) >= overshoot)
+            {
+                overshootMode = true;
+                myPID.SetTunings(aKp, aKi, aKd);
+            }
+            else if (overshootMode && abs(input - setpoint) < overshoot)
+            {
+                overshootMode = false;
+                myPID.SetTunings(Kp, Ki, Kd);
+            }
+            myPID.Compute();
+        }
     }
     curTime = millis();
     if (curTime - previousGraphTime >= graphInterval)
@@ -843,22 +908,17 @@ void loop(void)
             AutoTuneHelper(false);
         }
     }
-    else
+
+    // at startup, overheat in order to heat the whole thing up faster
+    if (startup && input < 120.0)
     {
-        // use more aggressive tunings when far away from setpoint
-        if (!overshootMode && abs(input - setpoint) >= overshoot)
-        {
-            overshootMode = true;
-            myPID.SetTunings(aKp, aKi, aKd);
-        }
-        else if (overshootMode && abs(input - setpoint) < overshoot)
-        {
-            overshootMode = false;
-            myPID.SetTunings(Kp, Ki, Kd);
-        }
-        myPID.Compute();
+        output = 100;
     }
-        
+    else if (startup && input >= 120.0)
+    {
+        startup = false;
+    }
+
     // output logic for the SSR
     curTime = millis();
     if (curTime - windowStartTime > windowSize)
