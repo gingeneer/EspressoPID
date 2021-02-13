@@ -1,5 +1,6 @@
 #include "EEPROM.h"
 #include <Adafruit_ADS1015.h>
+#include <Adafruit_MAX31865.h> // PT100 temp sensor
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
@@ -36,6 +37,18 @@
 // #define SERIESRESISTOR 99000
 // 10k better for this temp range
 #define SERIESRESISTOR 9850
+
+// PT100 stuff:
+// Use software SPI: CS, DI, DO, CLK
+Adafruit_MAX31865 pt100 = Adafruit_MAX31865(12, 27, 26, 35);
+// use hardware SPI, just pass in the CS pin
+//Adafruit_MAX31865 pt100 = Adafruit_MAX31865(10);
+// The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
+#define RREF 430.0
+// The 'nominal' 0-degrees-C resistance of the sensor
+// 100.0 for PT100, 1000.0 for PT1000
+#define RNOMINAL 100.0
+
 // how many speps per degree
 #define SETPOINT_ENCODER_RESOLUTION 2.0
 #define PID_ENCODER_RESOLUTION 10.0
@@ -63,14 +76,15 @@ float thermistor, thermocouple;
 //Define Variables we'll be connecting to PID
 double setpoint = 105, input, output;
 double calibration = -2.3;
-double overshoot = 2.0;
+double overshoot = 100.0;
 bool overshootMode = false;
 bool startup = true;
+uint8_t errorState = 0;
 //offset for display (what boiler temp equals which water temp)
 double temp_offset = 0;
 double thermocouple_offset;
 //Specify the links and initial tuning parameters
-double Kp = 2, Ki = 5, Kd = 1;
+double Kp = 7.4, Ki = 3.7, Kd = 52.4;
 // aggressive tunings for PID outside of overshoot range
 double aKp = 100, aKi = 0, aKd = 0;
 // 0: thermistor
@@ -469,12 +483,51 @@ void changeAutoTune()
     }
 }
 
+double getTemp_PT100()
+{
+    double temp = pt100.temperature(RNOMINAL, RREF) + calibration;
+    uint8_t fault = pt100.readFault();
+    if (fault)
+    {
+        errorState = fault;
+        Serial.print("Fault 0x");
+        Serial.println(fault, HEX);
+        if (fault & MAX31865_FAULT_HIGHTHRESH)
+        {
+            Serial.println("RTD High Threshold");
+        }
+        if (fault & MAX31865_FAULT_LOWTHRESH)
+        {
+            Serial.println("RTD Low Threshold");
+        }
+        if (fault & MAX31865_FAULT_REFINLOW)
+        {
+            Serial.println("REFIN- > 0.85 x Bias");
+        }
+        if (fault & MAX31865_FAULT_REFINHIGH)
+        {
+            Serial.println("REFIN- < 0.85 x Bias - FORCE- open");
+        }
+        if (fault & MAX31865_FAULT_RTDINLOW)
+        {
+            Serial.println("RTDIN- < 0.85 x Bias - FORCE- open");
+        }
+        if (fault & MAX31865_FAULT_OVUV)
+        {
+            Serial.println("Under/Over voltage");
+        }
+        pt100.clearFault();
+    }
+    return temp;
+}
+
 void setup(void)
 {
     Serial.begin(115200);
-    // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
     pinMode(SSR_PIN, OUTPUT);
     // initialize the TFT
+    pt100.begin(MAX31865_3WIRE);
+    pt100.enable50Hz(true);
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
@@ -598,6 +651,9 @@ void loop(void)
                 {
                     shotTimerStart = millis();
                     mainScreenState = START;
+                    tft.fillScreen(TFT_BLACK);
+                    initGraph = true;
+                    graphX = 0;
                 }
                 break;
             case START:
@@ -812,54 +868,55 @@ void loop(void)
         previousDisplayTime = curTime;
         updateDisplay();
     }
-    curTime = millis();
-    // gather adc samples before computing the PID vals
-    if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
-    {
-        previousADCSampleTime = curTime;
-        uint16_t temp = ads.readADC_SingleEnded(0);
-        ThermistorSamples += temp;
-        // Serial.print(temp);
-        temp = ads.readADC_SingleEnded(2);
-        ThermocoupleSamples += temp;
-        // Serial.print(", ");
-        // Serial.println(temp);
-        currentADCSample++;
-    }
-    curTime = millis();
+    // curTime = millis();
+    // // gather adc samples before computing the PID vals
+    // if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
+    // {
+    //     previousADCSampleTime = curTime;
+    //     uint16_t temp = ads.readADC_SingleEnded(0);
+    //     ThermistorSamples += temp;
+    //     // Serial.print(temp);
+    //     temp = ads.readADC_SingleEnded(2);
+    //     ThermocoupleSamples += temp;
+    //     // Serial.print(", ");
+    //     // Serial.println(temp);
+    //     currentADCSample++;
+    // }
+    // curTime = millis();
     if (curTime - previousPidTime >= pidInterval)
     {
         previousPidTime = curTime;
         // Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
-        startADCSampleTime = (curTime + pidInterval) - (NUMSAMPLES + 1) * ADCSampleInterval;
-        // compute the temps from adc samples
-        double steinhart = double(ThermistorSamples) / double(currentADCSample);
-        // double steinhart = double(ads.readADC_SingleEnded(0));
-        steinhart = (((3.3 / 4.096) * 2047.0) / steinhart) - 1;
-        steinhart = SERIESRESISTOR / steinhart;
-        steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
-        steinhart = log(steinhart);                       // ln(R/Ro)
-        steinhart /= BCOEFFICIENT;                        // 1/B * ln(R/Ro)
-        steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
-        steinhart = 1.0 / steinhart;                      // Invert
-        steinhart -= 273.15;                              // convert absolute temp to C
-        steinhart += calibration;
-        thermistor = steinhart;
+        // startADCSampleTime = (curTime + pidInterval) - (NUMSAMPLES + 1) * ADCSampleInterval;
+        // // compute the temps from adc samples
+        // double steinhart = double(ThermistorSamples) / double(currentADCSample);
+        // // double steinhart = double(ads.readADC_SingleEnded(0));
+        // steinhart = (((3.3 / 4.096) * 2047.0) / steinhart) - 1;
+        // steinhart = SERIESRESISTOR / steinhart;
+        // steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
+        // steinhart = log(steinhart);                       // ln(R/Ro)
+        // steinhart /= BCOEFFICIENT;                        // 1/B * ln(R/Ro)
+        // steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
+        // steinhart = 1.0 / steinhart;                      // Invert
+        // steinhart -= 273.15;                              // convert absolute temp to C
+        // steinhart += calibration;
+        // thermistor = steinhart;
 
-        double thermocouple_voltage = ((double(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
-        // float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
-        thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
-        switch (pidSource)
-        {
-        case 0:
-            input = thermistor;
-            break;
-        case 1:
-            input = thermocouple;
-            break;
-        case 2:
-            input = (thermistor + thermocouple) / 2;
-        }
+        // double thermocouple_voltage = ((double(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
+        // // float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
+        // thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
+        // switch (pidSource)
+        // {
+        // case 0:
+        //     input = thermistor;
+        //     break;
+        // case 1:
+        //     input = thermocouple;
+        //     break;
+        // case 2:
+        //     input = (thermistor + thermocouple) / 2;
+        // }
+        input = getTemp_PT100();
         input += temp_offset;
 
         // myPID.Compute();
@@ -918,7 +975,10 @@ void loop(void)
     {
         startup = false;
     }
-
+    if (errorState)
+    {
+        output = 0;
+    }
     // output logic for the SSR
     curTime = millis();
     if (curTime - windowStartTime > windowSize)
