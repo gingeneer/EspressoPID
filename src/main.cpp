@@ -1,12 +1,11 @@
 #include "EEPROM.h"
-#include <Adafruit_ADS1015.h>
 #include <Adafruit_MAX31865.h> // PT100 temp sensor
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
 #include <PID_AutoTune_v0.h>
 #include <PID_v1.h>
-#include <SPI.h>
+// #include <SPI.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
 
@@ -19,28 +18,14 @@
 // #define TFT_DC    2  // Data Command control pin
 // #define TFT_RST   4  // Reset pin (could connect to RST pin)
 
-#define THERMISTOR_PIN 34
-#define THERMOCOUPLE_PIN 35
 #define SSR_PIN 13
 #define ENCODER_BUTTON_PIN 32
-#define BACK_BUTTON_PIN 14
-#define ENCODER_CLK 33
-#define ENCODER_DT 25
-// resistance at 25 degrees C
-#define THERMISTORNOMINAL 100000
-// temp. for nominal resistance (almost always 25 C)
-#define TEMPERATURENOMINAL 25
-
-// The beta coefficient of the thermistor (usually 3000-4000)
-#define BCOEFFICIENT 3950
-// the value of the 'other' resistor
-// #define SERIESRESISTOR 99000
-// 10k better for this temp range
-#define SERIESRESISTOR 9850
-
+#define BACK_BUTTON_PIN 33
+#define ENCODER_CLK 36 //VP
+#define ENCODER_DT 39 //VN
 // PT100 stuff:
 // Use software SPI: CS, DI, DO, CLK
-Adafruit_MAX31865 pt100 = Adafruit_MAX31865(12, 27, 26, 35);
+Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14, 27, 26, 25);
 // use hardware SPI, just pass in the CS pin
 //Adafruit_MAX31865 pt100 = Adafruit_MAX31865(10);
 // The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
@@ -55,24 +40,17 @@ Adafruit_MAX31865 pt100 = Adafruit_MAX31865(12, 27, 26, 35);
 
 #define EEPROM_SIZE 1000
 
-// uint16_t tempArray[TFT_WIDTH];
-// uint8_t outputArray[TFT_WIDTH];
 int previousTempY = 0;
 int previousTemp2Y = 0;
 int previousDutyY = 40;
 
 ESP32Encoder encoder;
 
-// how many samples to take and average, more takes longer
-// but is more 'smooth' (NUMSAMPLE*ADCSampleInterval < pidInterval)
-#define NUMSAMPLES 5
-const int displayInterval = 50, graphInterval = 500, pidInterval = 100, ADCSampleInterval = 5;
-unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousADCSampleTime = 0, startADCSampleTime = 0;
-uint8_t currentADCSample = 0;
-long ThermistorSamples, ThermocoupleSamples;
+const int displayInterval = 50, graphInterval = 500, pidInterval = 100, FSMInterval = 20;
+unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousFSMTime = 0;
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
-float thermistor, thermocouple;
+double thermistor, thermocouple;
 //Define Variables we'll be connecting to PID
 double setpoint = 105, input, output;
 double calibration = -2.3;
@@ -106,11 +84,7 @@ int windowSize = 500;
 unsigned long windowStartTime;
 unsigned long shotTimerStart;
 unsigned long shotTimerStop;
-bool timerRunning;
 bool initGraph = false;
-
-// external ADC, since the one on esp32 is shite
-Adafruit_ADS1015 ads(0x48);
 
 enum SetupStates
 {
@@ -345,18 +319,15 @@ void updateDisplay()
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(4);
     // tft.fillRect(0, curHeight, TFT_WIDTH/2, tft.fontHeight(4), TFT_BLACK);
-    snprintf(buf, 11, "%6.1f`C    ", thermistor);
+    snprintf(buf, 11, "%6.1f`C    ", input);
     uint8_t len = tft.drawString(buf, 0, curHeight);
-    // tft.drawChar(223, len, curHeight)
-    // uint8_t len = tft.drawFloat(thermistor, 1, 0, 12);
-    // tft.setTextFont(2);
-    // len += tft.drawString("o", len, curHeight);
-    // degrees from thermocouple
-    // len += 4;
-    // snprintf(buf, 6, "%5.1f", thermocouple);
-    // len += tft.drawFloat(thermocouple, 1, len, 12);
-    // len += tft.drawString(buf, len, curHeight);
-    // len += tft.drawString("c", len, curHeight);
+    if (errorState)
+    {
+        tft.setTextFont(2);
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        len += tft.drawString("ERROR: ", len, curHeight);
+        tft.drawNumber(errorState, len, curHeight);
+    }
 
     switch (menu)
     {
@@ -449,13 +420,6 @@ void moveSelection(uint8_t from, uint8_t to, bool visible)
         tft.fillRect(2, 60 + to * 10, 7, 7, TFT_RED);
 }
 
-double round(double x, int precision)
-{
-    long factor = pow(10, precision);
-    long temp = long(x) * factor;
-    return float(temp) / factor;
-}
-
 void AutoTuneHelper(boolean start)
 {
     if (start)
@@ -486,6 +450,7 @@ void changeAutoTune()
 double getTemp_PT100()
 {
     double temp = pt100.temperature(RNOMINAL, RREF) + calibration;
+    // Serial.println(temp);
     uint8_t fault = pt100.readFault();
     if (fault)
     {
@@ -571,9 +536,7 @@ void setup(void)
     myPID.SetOutputLimits(0, 100);
     myPID.SetMode(AUTOMATIC);
     myPID.SetSampleTime(pidInterval);
-    analogSetAttenuation(ADC_11db);
     myPID.SetTunings(Kp, Ki, Kd);
-
     if (tuning)
     {
         tuning = false;
@@ -589,14 +552,11 @@ void setup(void)
     // Attache pins for use as encoder pins
     encoder.attachHalfQuad(ENCODER_DT, ENCODER_CLK);
     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
-    ads.setGain(GAIN_ONE);
-    ads.begin();
     initGraph = true;
 }
 
-void loop(void)
+void FSM()
 {
-    unsigned long looptime = millis();
     encoderBounce.update();
     backButtonBounce.update();
     bool selectPressed = false;
@@ -637,8 +597,10 @@ void loop(void)
     }
 
     // FSM update
-    if (looptime % 20 == 0 || update)
+    unsigned long curTime = millis();
+    if (update || curTime - previousFSMTime >= FSMInterval)
     {
+        previousFSMTime = curTime;
         switch (menu)
         {
         case MAIN:
@@ -678,6 +640,10 @@ void loop(void)
                 menu = SETUP;
                 setupState = SETPOINT;
                 encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
+            }
+            if (longBack)
+            {
+                changeAutoTune();
             }
             break;
         case SETUP:
@@ -857,73 +823,33 @@ void loop(void)
             }
             break;
         }
-        if (longBack)
-        {
-            changeAutoTune();
-        }
     }
+}
+
+void loop(void)
+{
+    FSM();
     unsigned long curTime = millis();
     if (curTime - previousDisplayTime >= displayInterval)
     {
         previousDisplayTime = curTime;
         updateDisplay();
     }
-    // curTime = millis();
-    // // gather adc samples before computing the PID vals
-    // if (curTime >= startADCSampleTime && curTime - previousADCSampleTime >= ADCSampleInterval)
-    // {
-    //     previousADCSampleTime = curTime;
-    //     uint16_t temp = ads.readADC_SingleEnded(0);
-    //     ThermistorSamples += temp;
-    //     // Serial.print(temp);
-    //     temp = ads.readADC_SingleEnded(2);
-    //     ThermocoupleSamples += temp;
-    //     // Serial.print(", ");
-    //     // Serial.println(temp);
-    //     currentADCSample++;
-    // }
-    // curTime = millis();
     if (curTime - previousPidTime >= pidInterval)
     {
         previousPidTime = curTime;
-        // Serial.printf("therm: %d, TC: %d, samples: %d\n", ThermistorSamples, ThermocoupleSamples, currentADCSample);
-        // startADCSampleTime = (curTime + pidInterval) - (NUMSAMPLES + 1) * ADCSampleInterval;
-        // // compute the temps from adc samples
-        // double steinhart = double(ThermistorSamples) / double(currentADCSample);
-        // // double steinhart = double(ads.readADC_SingleEnded(0));
-        // steinhart = (((3.3 / 4.096) * 2047.0) / steinhart) - 1;
-        // steinhart = SERIESRESISTOR / steinhart;
-        // steinhart = steinhart / THERMISTORNOMINAL;        // (R/Ro)
-        // steinhart = log(steinhart);                       // ln(R/Ro)
-        // steinhart /= BCOEFFICIENT;                        // 1/B * ln(R/Ro)
-        // steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15); // + (1/To)
-        // steinhart = 1.0 / steinhart;                      // Invert
-        // steinhart -= 273.15;                              // convert absolute temp to C
-        // steinhart += calibration;
-        // thermistor = steinhart;
 
-        // double thermocouple_voltage = ((double(ThermocoupleSamples) / currentADCSample) * 3.3) / (4095);
-        // // float thermocouple_voltage = float(ads.readADC_SingleEnded(2) * 4.096 / 2047);
-        // thermocouple = ((thermocouple_voltage - 1.25) / 0.005) + thermocouple_offset;
-        // switch (pidSource)
-        // {
-        // case 0:
-        //     input = thermistor;
-        //     break;
-        // case 1:
-        //     input = thermocouple;
-        //     break;
-        // case 2:
-        //     input = (thermistor + thermocouple) / 2;
-        // }
-        input = getTemp_PT100();
+        thermistor = getTemp_PT100();
+        input = thermistor;
         input += temp_offset;
-
-        // myPID.Compute();
-        ThermistorSamples = 0;
-        ThermocoupleSamples = 0;
-        currentADCSample = 0;
-
+        if ((input <= 1 || input > 180) && !errorState)
+        {
+            errorState = 69;
+        }else if ((input > 1 && input < 180) && errorState == 69)
+        {
+            errorState = 0;
+        }
+        
         if (!tuning)
         {
             // use more aggressive tunings when far away from setpoint
@@ -946,7 +872,7 @@ void loop(void)
         previousGraphTime = curTime;
         graphX = (graphX + 1) % TFT_WIDTH;
         // Serial.println(String(input) + ", " + String(output));
-        updateGraph(thermistor, thermocouple, output, initGraph);
+        updateGraph(input, thermocouple, output, initGraph);
         initGraph = false;
     }
     if (tuning)
