@@ -25,9 +25,9 @@
 #define ENCODER_DT 39 //VN
 // PT100 stuff:
 // Use software SPI: CS, DI, DO, CLK
-Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14, 27, 26, 25);
+// Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14, 27, 26, 25);
 // use hardware SPI, just pass in the CS pin
-//Adafruit_MAX31865 pt100 = Adafruit_MAX31865(10);
+Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14);
 // The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
 #define RREF 430.0
 // The 'nominal' 0-degrees-C resistance of the sensor
