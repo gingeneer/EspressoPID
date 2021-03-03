@@ -1,5 +1,6 @@
 #include "EEPROM.h"
 #include <Adafruit_MAX31865.h> // PT100 temp sensor
+#include "Adafruit_MAX31855.h" // thermocouple amp
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
@@ -33,6 +34,9 @@ Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14);
 // The 'nominal' 0-degrees-C resistance of the sensor
 // 100.0 for PT100, 1000.0 for PT1000
 #define RNOMINAL 100.0
+
+// use hardware SPI for the thermocouple amplifier, pass CS pin
+Adafruit_MAX31855 max31855 = Adafruit_MAX31855(27);
 
 // how many speps per degree
 #define SETPOINT_ENCODER_RESOLUTION 2.0
@@ -307,9 +311,17 @@ void updateDisplay()
     }
     if (startup)
     {
-        tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+        tft.setTextColor(TFT_CYAN, TFT_BLACK);
     }
-    snprintf(buf, 5, "%3d%%", (int)output);
+    if (errorState)
+    {
+        tft.setTextColor(TFT_BLACK, TFT_RED);
+        snprintf(buf, 12, "E:0x%x", (int)output);
+    }
+    else
+    {
+        snprintf(buf, 5, "%3d%%", (int)output);
+    }
     tft.drawString(buf, TFT_WIDTH / 2, 0);
     tft.drawFastHLine(0, tft.fontHeight(2) + 1, TFT_WIDTH, TFT_ORANGE);
 
@@ -319,15 +331,11 @@ void updateDisplay()
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(4);
     // tft.fillRect(0, curHeight, TFT_WIDTH/2, tft.fontHeight(4), TFT_BLACK);
-    snprintf(buf, 11, "%6.1f`C    ", input);
+    snprintf(buf, 11, "%6.1f`C   ", input);
     uint8_t len = tft.drawString(buf, 0, curHeight);
-    if (errorState)
-    {
-        tft.setTextFont(2);
-        tft.setTextColor(TFT_RED, TFT_BLACK);
-        len += tft.drawString("ERROR: ", len, curHeight);
-        tft.drawNumber(errorState, len, curHeight);
-    }
+    tft.setTextFont(2);
+    snprintf(buf, 11, "%6.1f`C   ", thermocouple);
+    len += tft.drawString(buf, len, curHeight);
 
     switch (menu)
     {
@@ -452,9 +460,9 @@ double getTemp_PT100()
     double temp = pt100.temperature(RNOMINAL, RREF) + calibration;
     // Serial.println(temp);
     uint8_t fault = pt100.readFault();
+    errorState = fault;
     if (fault)
     {
-        errorState = fault;
         Serial.print("Fault 0x");
         Serial.println(fault, HEX);
         if (fault & MAX31865_FAULT_HIGHTHRESH)
@@ -486,16 +494,28 @@ double getTemp_PT100()
     return temp;
 }
 
+double getTemp_thermocouple(){
+    double temp = max31855.readCelsius() + thermocouple_offset;
+    uint8_t error = max31855.readError();
+    if (error){
+        Serial.print("Thermocouple Error: ");
+        Serial.println(error);
+    }
+    return temp;
+}
+
 void setup(void)
 {
     Serial.begin(115200);
     pinMode(SSR_PIN, OUTPUT);
-    // initialize the TFT
     pt100.begin(MAX31865_3WIRE);
     pt100.enable50Hz(true);
+    // initialize the TFT
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
+    // initialize thermocouple
+    max31855.begin();
     encoderBounce.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
     encoderBounce.interval(25);
     backButtonBounce.attach(BACK_BUTTON_PIN, INPUT_PULLUP);
@@ -840,7 +860,18 @@ void loop(void)
         previousPidTime = curTime;
 
         thermistor = getTemp_PT100();
-        input = thermistor;
+        thermocouple = getTemp_thermocouple();
+        switch (pidSource)
+        {
+        case 0:
+            input = thermistor;
+            break;
+        case 1:
+            input = thermocouple;
+            break;
+        case 2:
+            input = (thermistor + thermocouple) / 2;
+        }
         input += temp_offset;
         if ((input <= 1 || input > 180) && !errorState)
         {
@@ -872,7 +903,7 @@ void loop(void)
         previousGraphTime = curTime;
         graphX = (graphX + 1) % TFT_WIDTH;
         // Serial.println(String(input) + ", " + String(output));
-        updateGraph(input, thermocouple, output, initGraph);
+        updateGraph(thermistor + temp_offset, thermocouple + temp_offset, output, initGraph);
         initGraph = false;
     }
     if (tuning)
