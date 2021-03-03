@@ -60,7 +60,7 @@ double setpoint = 105, input, output;
 double calibration = -2.3;
 double overshoot = 100.0;
 bool overshootMode = false;
-bool startup = true;
+bool startup = false;
 uint8_t errorState = 0;
 //offset for display (what boiler temp equals which water temp)
 double temp_offset = 0;
@@ -573,6 +573,11 @@ void setup(void)
     encoder.attachHalfQuad(ENCODER_DT, ENCODER_CLK);
     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
     initGraph = true;
+    // intentionally overshoot if the machine is cold
+    if (getTemp_PT100() < 50.0)
+    {
+        startup = true;
+    }
 }
 
 void FSM()
