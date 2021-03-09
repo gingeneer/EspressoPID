@@ -929,11 +929,11 @@ void loop(void)
     }
 
     // at startup, overheat in order to heat the whole thing up faster
-    if (startup && input < 120.0)
+    if (startup && input < 140.0)
     {
         output = 100;
     }
-    else if (startup && input >= 120.0)
+    else if (startup && input >= 140.0)
     {
         startup = false;
     }
