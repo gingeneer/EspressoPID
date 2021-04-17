@@ -1,6 +1,6 @@
 #include "EEPROM.h"
 #include <Adafruit_MAX31865.h> // PT100 temp sensor
-#include "Adafruit_MAX31855.h" // thermocouple amp
+// #include "Adafruit_MAX31855.h" // thermocouple amp
 #include <Arduino.h>
 #include <Bounce2.h>
 #include <ESP32Encoder.h>
@@ -28,7 +28,10 @@
 // Use software SPI: CS, DI, DO, CLK
 // Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14, 27, 26, 25);
 // use hardware SPI, just pass in the CS pin
-Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14);
+Adafruit_MAX31865* pt100 = new Adafruit_MAX31865(14);
+
+Adafruit_MAX31865* pt100_2 = new Adafruit_MAX31865(27);
+
 // The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
 #define RREF 430.0
 // The 'nominal' 0-degrees-C resistance of the sensor
@@ -36,7 +39,7 @@ Adafruit_MAX31865 pt100 = Adafruit_MAX31865(14);
 #define RNOMINAL 100.0
 
 // use hardware SPI for the thermocouple amplifier, pass CS pin
-Adafruit_MAX31855 max31855 = Adafruit_MAX31855(27);
+// Adafruit_MAX31855 max31855 = Adafruit_MAX31855(27);
 
 // how many speps per degree
 #define SETPOINT_ENCODER_RESOLUTION 2.0
@@ -50,28 +53,28 @@ int previousDutyY = 40;
 
 ESP32Encoder encoder;
 
-const int displayInterval = 50, graphInterval = 500, pidInterval = 100, FSMInterval = 20;
+const int displayInterval = 50, graphInterval = 500, pidInterval = 250, FSMInterval = 20;
 unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousFSMTime = 0;
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
-double thermistor, thermocouple;
+double temp_1, temp_2;
 //Define Variables we'll be connecting to PID
 double setpoint = 105, input, output;
-double calibration = -2.3;
+double temp_1_cal = -2.3;
 double overshoot = 100.0;
 bool overshootMode = false;
 bool startup = false;
 uint8_t errorState = 0;
 //offset for display (what boiler temp equals which water temp)
 double temp_offset = 0;
-double thermocouple_offset;
+double temp_2_cal;
 //Specify the links and initial tuning parameters
 double Kp = 7.4, Ki = 3.7, Kd = 52.4;
 // aggressive tunings for PID outside of overshoot range
 double aKp = 100, aKi = 0, aKd = 0;
-// 0: thermistor
-// 1: thermocouple
-// 2: avg(thermistor, thermocouple)
+// 0: temp_1
+// 1: temp_2
+// 2: avg(temp_1, temp_2)
 uint8_t pidSource = 0;
 PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT);
 
@@ -144,11 +147,11 @@ void saveValues()
     addr += sizeof(double);
     EEPROM.writeDouble(addr, Kd);
     addr += sizeof(double);
-    EEPROM.writeDouble(addr, calibration);
+    EEPROM.writeDouble(addr, temp_1_cal);
     addr += sizeof(double);
     EEPROM.writeDouble(addr, temp_offset);
     addr += sizeof(double);
-    EEPROM.writeDouble(addr, thermocouple_offset);
+    EEPROM.writeDouble(addr, temp_2_cal);
     addr += sizeof(double);
     EEPROM.writeDouble(addr, overshoot);
     addr += sizeof(double);
@@ -326,7 +329,7 @@ void updateDisplay()
     tft.drawFastHLine(0, tft.fontHeight(2) + 1, TFT_WIDTH, TFT_ORANGE);
 
     uint8_t curHeight = tft.fontHeight(2) + 5;
-    // degrees thermistor
+    // degrees temp_1
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(TL_DATUM);
     tft.setTextFont(4);
@@ -334,7 +337,7 @@ void updateDisplay()
     snprintf(buf, 11, "%6.1f`C   ", input);
     uint8_t len = tft.drawString(buf, 0, curHeight);
     tft.setTextFont(2);
-    snprintf(buf, 11, "%6.1f`C   ", thermocouple);
+    snprintf(buf, 11, "%6.1f`C   ", temp_2);
     len += tft.drawString(buf, len, curHeight);
 
     switch (menu)
@@ -381,13 +384,13 @@ void updateDisplay()
         tft.printf("D: %6.3f", Kd);
         curLine += lineIncr;
         tft.setCursor(10, curLine);
-        tft.printf("Therm. cal:%7.2f", calibration);
+        tft.printf("T1 cal:%7.2f", temp_1_cal);
         curLine += lineIncr;
         tft.setCursor(10, curLine);
         tft.printf("T offset:%4.1f", temp_offset);
         curLine += lineIncr;
         tft.setCursor(10, curLine);
-        tft.printf("TC cal:%7.2f", thermocouple_offset);
+        tft.printf("T2 cal:%7.2f", temp_2_cal);
         curLine += lineIncr;
         tft.setCursor(10, curLine);
         tft.printf("overshoot:%5.2f", overshoot);
@@ -455,11 +458,11 @@ void changeAutoTune()
     }
 }
 
-double getTemp_PT100()
+double getTemp_PT100(Adafruit_MAX31865* sensor)
 {
-    double temp = pt100.temperature(RNOMINAL, RREF) + calibration;
+    double temp = sensor->temperature(RNOMINAL, RREF);
     // Serial.println(temp);
-    uint8_t fault = pt100.readFault();
+    uint8_t fault = sensor->readFault();
     errorState = fault;
     if (fault)
     {
@@ -489,33 +492,34 @@ double getTemp_PT100()
         {
             Serial.println("Under/Over voltage");
         }
-        pt100.clearFault();
+        sensor->clearFault();
     }
     return temp;
 }
 
-double getTemp_thermocouple(){
-    double temp = max31855.readCelsius() + thermocouple_offset;
-    uint8_t error = max31855.readError();
-    if (error){
-        Serial.print("Thermocouple Error: ");
-        Serial.println(error);
-    }
-    return temp;
-}
+// double getTemp_thermocouple(){
+//     double temp = max31855.readCelsius() + temp_2_cal;
+//     uint8_t error = max31855.readError();
+//     if (error){
+//         Serial.print("Thermocouple Error: ");
+//         Serial.println(error);
+//     }
+//     return temp;
+// }
 
 void setup(void)
 {
     Serial.begin(115200);
     pinMode(SSR_PIN, OUTPUT);
-    pt100.begin(MAX31865_3WIRE);
-    pt100.enable50Hz(true);
+    pt100->begin(MAX31865_3WIRE);
+    pt100->enable50Hz(true);
     // initialize the TFT
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
-    // initialize thermocouple
-    max31855.begin();
+    // initialize 2nd sensor
+    pt100_2->begin(MAX31865_4WIRE);
+    pt100_2->enable50Hz(true);
     encoderBounce.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
     encoderBounce.interval(25);
     backButtonBounce.attach(BACK_BUTTON_PIN, INPUT_PULLUP);
@@ -541,11 +545,11 @@ void setup(void)
         addr += sizeof(double);
         Kd = EEPROM.readDouble(addr);
         addr += sizeof(double);
-        calibration = EEPROM.readDouble(addr);
+        temp_1_cal = EEPROM.readDouble(addr);
         addr += sizeof(double);
         temp_offset = EEPROM.readDouble(addr);
         addr += sizeof(double);
-        thermocouple_offset = EEPROM.readDouble(addr);
+        temp_2_cal = EEPROM.readDouble(addr);
         addr += sizeof(double);
         overshoot = EEPROM.readDouble(addr);
         addr += sizeof(double);
@@ -574,10 +578,11 @@ void setup(void)
     encoder.setCount(setpoint * SETPOINT_ENCODER_RESOLUTION);
     initGraph = true;
     // intentionally overshoot if the machine is cold
-    if (getTemp_PT100() < 50.0)
+    if (getTemp_PT100(pt100) < 50.0)
     {
         startup = true;
     }
+    Serial.println("DONE SETUP LOOP");
 }
 
 void FSM()
@@ -738,7 +743,7 @@ void FSM()
                 if (selectPressed)
                 {
                     setupState = CAL;
-                    encoder.setCount(calibration * 20.0);
+                    encoder.setCount(temp_1_cal * 20.0);
                     moveSelection(3, 4, true);
                 }
                 if (backPressed)
@@ -749,7 +754,7 @@ void FSM()
                 }
                 break;
             case CAL:
-                calibration = ((double)encoder.getCount()) / 20.0;
+                temp_1_cal = ((double)encoder.getCount()) / 20.0;
                 if (selectPressed)
                 {
                     encoder.setCount(temp_offset * 10.0);
@@ -767,7 +772,7 @@ void FSM()
                 temp_offset = ((double)encoder.getCount()) / 10.0;
                 if (selectPressed)
                 {
-                    encoder.setCount(thermocouple_offset * 10.0);
+                    encoder.setCount(temp_2_cal * 10.0);
                     setupState = TC_OFFSET;
                     moveSelection(5, 6, true);
                 }
@@ -779,7 +784,7 @@ void FSM()
                 }
                 break;
             case TC_OFFSET:
-                thermocouple_offset = ((double)encoder.getCount()) / 10.0;
+                temp_2_cal = ((double)encoder.getCount()) / 10.0;
                 if (selectPressed)
                 {
                     encoder.setCount(overshoot * 2.0);
@@ -860,24 +865,26 @@ void loop(void)
         previousDisplayTime = curTime;
         updateDisplay();
     }
+    curTime = millis();
     if (curTime - previousPidTime >= pidInterval)
     {
         previousPidTime = curTime;
 
-        thermistor = getTemp_PT100();
-        thermocouple = getTemp_thermocouple();
+        temp_1 = getTemp_PT100(pt100) + temp_1_cal + temp_offset;
+        temp_2 = getTemp_PT100(pt100_2) + temp_2_cal + temp_offset;
+        Serial.println(millis() - curTime);
         switch (pidSource)
         {
         case 0:
-            input = thermistor;
+            input = temp_1;
             break;
         case 1:
-            input = thermocouple;
+            input = temp_2;
             break;
         case 2:
-            input = (thermistor + thermocouple) / 2;
+            input = (temp_1 + temp_2) / 2;
         }
-        input += temp_offset;
+        // input += temp_offset;
         if ((input <= 1 || input > 180) && !errorState)
         {
             errorState = 69;
@@ -908,7 +915,7 @@ void loop(void)
         previousGraphTime = curTime;
         graphX = (graphX + 1) % TFT_WIDTH;
         // Serial.println(String(input) + ", " + String(output));
-        updateGraph(thermistor + temp_offset, thermocouple + temp_offset, output, initGraph);
+        updateGraph(temp_1, temp_2, output, initGraph);
         initGraph = false;
     }
     if (tuning)
