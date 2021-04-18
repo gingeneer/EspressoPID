@@ -6,7 +6,7 @@
 #include <ESP32Encoder.h>
 #include <PID_AutoTune_v0.h>
 #include <PID_v1.h>
-// #include <SPI.h>
+#include <SPI.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <Wire.h>
 
@@ -30,7 +30,7 @@
 // use hardware SPI, just pass in the CS pin
 Adafruit_MAX31865* pt100 = new Adafruit_MAX31865(14);
 
-Adafruit_MAX31865* pt100_2 = new Adafruit_MAX31865(27);
+// Adafruit_MAX31865* pt100_2 = new Adafruit_MAX31865(27);
 
 // The value of the Rref resistor. Use 430.0 for PT100 and 4300.0 for PT1000
 #define RREF 430.0
@@ -53,7 +53,7 @@ int previousDutyY = 40;
 
 ESP32Encoder encoder;
 
-const int displayInterval = 50, graphInterval = 500, pidInterval = 250, FSMInterval = 20;
+const int displayInterval = 50, graphInterval = 500, pidInterval = 100, FSMInterval = 20;
 unsigned long previousDisplayTime = 0, previousGraphTime = 0, previousPidTime = 0, previousFSMTime = 0;
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
@@ -172,7 +172,7 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
     float scale = float(height) / (float(max) - min);
     int nextIndex = (graphX + 1) % TFT_WIDTH;
     int tempY = TFT_HEIGHT - int(((temp1 - min) * scale + 0.5));
-    int temp2Y = TFT_HEIGHT - int(((temp2 - min) * scale + 0.5));
+    // int temp2Y = TFT_HEIGHT - int(((temp2 - min) * scale + 0.5));
     // int dutyCycleY = TFT_HEIGHT - int(dutycycle * ((float(max) / 100.0f) + 0.5);
     int dutyCycleY = TFT_HEIGHT - int(dutycycle * ((float(80 - min) * scale) / 100.0f) + 0.5);
     if (dutyCycleY == TFT_HEIGHT)
@@ -224,7 +224,7 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
     if (graphX <= 1)
     {
         previousTempY = tempY;
-        previousTemp2Y = temp2Y;
+        // previousTemp2Y = temp2Y;
         previousDutyY = dutyCycleY;
     }
     if (previousTempY < TFT_HEIGHT - height)
@@ -261,21 +261,21 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
             tft.drawPixel(graphX, tempY, TFT_RED);
         }
     }
-    if (temp2 >= min && temp2 <= max)
-    {
-        if (temp2Y > previousTemp2Y)
-        {
-            tft.drawFastVLine(graphX, previousTemp2Y, temp2Y - previousTemp2Y + 1, TFT_PINK);
-        }
-        else if (temp2Y < previousTemp2Y)
-        {
-            tft.drawFastVLine(graphX, temp2Y, previousTemp2Y - temp2Y + 1, TFT_PINK);
-        }
-        else
-        {
-            tft.drawPixel(graphX, temp2Y, TFT_PINK);
-        }
-    }
+    // if (temp2 >= min && temp2 <= max)
+    // {
+    //     if (temp2Y > previousTemp2Y)
+    //     {
+    //         tft.drawFastVLine(graphX, previousTemp2Y, temp2Y - previousTemp2Y + 1, TFT_PINK);
+    //     }
+    //     else if (temp2Y < previousTemp2Y)
+    //     {
+    //         tft.drawFastVLine(graphX, temp2Y, previousTemp2Y - temp2Y + 1, TFT_PINK);
+    //     }
+    //     else
+    //     {
+    //         tft.drawPixel(graphX, temp2Y, TFT_PINK);
+    //     }
+    // }
     tft.drawFastVLine(nextIndex, TFT_HEIGHT - height - 4, height + 4, TFT_WHITE);
     if (nextIndex < TFT_WIDTH - 1)
     {
@@ -284,7 +284,7 @@ void updateGraph(double temp1, double temp2, float dutycycle, bool initialize)
 
     previousDutyY = dutyCycleY;
     previousTempY = tempY;
-    previousTemp2Y = temp2Y;
+    // previousTemp2Y = temp2Y;
 }
 
 // update the display output
@@ -337,8 +337,8 @@ void updateDisplay()
     snprintf(buf, 11, "%6.1f`C   ", input);
     uint8_t len = tft.drawString(buf, 0, curHeight);
     tft.setTextFont(2);
-    snprintf(buf, 11, "%6.1f`C   ", temp_2);
-    len += tft.drawString(buf, len, curHeight);
+    // snprintf(buf, 11, "%6.1f`C   ", temp_2);
+    // len += tft.drawString(buf, len, curHeight);
 
     switch (menu)
     {
@@ -511,15 +511,16 @@ void setup(void)
 {
     Serial.begin(115200);
     pinMode(SSR_PIN, OUTPUT);
-    pt100->begin(MAX31865_3WIRE);
+    pt100->begin(MAX31865_4WIRE);
     pt100->enable50Hz(true);
+    pt100->autoConvert(true);
     // initialize the TFT
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
     // initialize 2nd sensor
-    pt100_2->begin(MAX31865_4WIRE);
-    pt100_2->enable50Hz(true);
+    // pt100_2->begin(MAX31865_4WIRE);
+    // pt100_2->enable50Hz(true);
     encoderBounce.attach(ENCODER_BUTTON_PIN, INPUT_PULLUP);
     encoderBounce.interval(25);
     backButtonBounce.attach(BACK_BUTTON_PIN, INPUT_PULLUP);
@@ -871,19 +872,20 @@ void loop(void)
         previousPidTime = curTime;
 
         temp_1 = getTemp_PT100(pt100) + temp_1_cal + temp_offset;
-        temp_2 = getTemp_PT100(pt100_2) + temp_2_cal + temp_offset;
-        Serial.println(millis() - curTime);
-        switch (pidSource)
-        {
-        case 0:
-            input = temp_1;
-            break;
-        case 1:
-            input = temp_2;
-            break;
-        case 2:
-            input = (temp_1 + temp_2) / 2;
-        }
+        // temp_2 = getTemp_PT100(pt100_2) + temp_2_cal + temp_offset;
+        // Serial.println(millis() - curTime);
+        // switch (pidSource)
+        // {
+        // case 0:
+        //     input = temp_1;
+        //     break;
+        // case 1:
+        //     input = temp_2;
+        //     break;
+        // case 2:
+        //     input = (temp_1 + temp_2) / 2;
+        // }
+        input = temp_1;
         // input += temp_offset;
         if ((input <= 1 || input > 180) && !errorState)
         {
@@ -936,11 +938,11 @@ void loop(void)
     }
 
     // at startup, overheat in order to heat the whole thing up faster
-    if (startup && input < 140.0)
+    if (startup && input < 120.0)
     {
         output = 100;
     }
-    else if (startup && input >= 140.0)
+    else if (startup && input >= 120.0)
     {
         startup = false;
     }
